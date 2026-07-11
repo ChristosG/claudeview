@@ -47,6 +47,22 @@ export const Freshness = z.enum([
 ]);
 export type Freshness = z.infer<typeof Freshness>;
 
+/**
+ * Set when a model has READ the changed code and found it refutes the claim.
+ *
+ * This is strictly more information than "the bytes moved", and it must outrank the
+ * mechanical check — otherwise a re-index would silently downgrade a verified contradiction
+ * back to a mere "stale", and the strongest thing we know would be the first thing we lose.
+ *
+ * (`staleness.ts` has always read this field. Until now, nothing could ever write it — so the
+ * `contradicted` verdict was unreachable: a whole tier of the trust model that existed only
+ * in the type.)
+ */
+const Contradiction = z.object({
+  reason: z.string(),
+  ts: z.string(),
+}).optional();
+
 /** Fields carried by every record in the store. */
 const Base = {
   id: z.string(),
@@ -113,6 +129,7 @@ export const Flow = z.object({
   name: z.string(),
   summary: z.string(),
   steps: z.array(FlowStep).default([]),
+  contradicted: Contradiction,
 });
 export type Flow = z.infer<typeof Flow>;
 
@@ -131,6 +148,8 @@ export const Decision = z.object({
   supersedes: z.string().optional(),
   anchors: z.array(Anchor).default([]),
   status: z.enum(['active', 'superseded']).default('active'),
+  /** A model read the new code and found it refutes this. Outranks the mechanical check. */
+  contradicted: Contradiction,
 });
 export type Decision = z.infer<typeof Decision>;
 
@@ -163,6 +182,7 @@ export const Experiment = z.object({
   /** What we actually did about it. An experiment with no action was a waste. */
   action: z.string().optional(),
   anchors: z.array(Anchor).default([]),
+  contradicted: Contradiction,
 });
 export type Experiment = z.infer<typeof Experiment>;
 
@@ -181,6 +201,9 @@ export const Insight = z.object({
   /** 'dismissed' is permanent and must never be re-raised. Nagging destroys trust. */
   status: z.enum(['open', 'accepted', 'dismissed', 'fixed']).default('open'),
   dismissReason: z.string().optional(),
+  /** How it was fixed, and where. History, not nagging. */
+  resolution: z.object({ note: z.string(), ts: z.string() }).optional(),
+  contradicted: Contradiction,
 });
 export type Insight = z.infer<typeof Insight>;
 

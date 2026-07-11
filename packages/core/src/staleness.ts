@@ -101,10 +101,14 @@ export function checkStaleness(store: Store): StalenessReport {
         return { anchor: a, freshness: 'fresh' as const, actual };
       });
 
-      // An Auditor verdict outranks the mechanical check: a model has actually read the
-      // new code and found it refutes the claim. That is strictly more information than
-      // "the bytes changed", so it must not be downgraded back to 'stale' on re-check.
-      const freshness: Freshness = rec.freshness === 'contradicted' ? 'contradicted' : worst(statuses);
+      // An Auditor verdict outranks the mechanical check: a model has actually read the new
+      // code and found it refutes the claim. That is strictly more information than "the
+      // bytes changed", so it must never be downgraded back to 'stale' on re-check.
+      //
+      // It is cleared only by RE-ANCHORING (cv resolve --reaffirm), i.e. by someone looking
+      // at the new code and saying the claim holds after all. A contradiction is retired by
+      // evidence, not by time passing.
+      const freshness: Freshness = rec.contradicted ? 'contradicted' : worst(statuses);
 
       claims.push({ kind, id: rec.id, title: titleOf(rec), freshness, anchors: statuses });
     }

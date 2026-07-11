@@ -183,6 +183,81 @@ const commands: Record<string, () => Promise<void> | void> = {
     console.log(`annotated ${n} components`);
   },
 
+  /**
+   * Close the loop on a stale claim.
+   *
+   * When a session FIXES something, the store had no way to hear about it: the insight sat
+   * there `open` and amber forever, indistinguishable from one nobody had bothered with.
+   * "Found and fixed" and "found and ignored" are completely different facts, and a trust
+   * panel that cannot tell them apart is a trust panel that stays permanently alarmed —
+   * which is the same as being permanently ignored.
+   *
+   * Three honest outcomes, and only three:
+   *
+   *   fixed     — the problem is gone. Re-anchor to the NEW code so the panel goes green,
+   *               and keep the record forever as history: this was found, then addressed.
+   *   reaffirm  — the code moved but the claim still holds. Re-pin it. (This is the common
+   *               case for a Flow or a Decision after a refactor.)
+   *   contradict— the code now REFUTES the claim. This is the strongest verdict in the
+   *               system and the only one a mechanical check can never reach.
+   *
+   * Note what is deliberately absent: there is no way to mark something resolved WITHOUT
+   * re-reading the code, because the whole point is that the anchor is re-taken from reality.
+   * You cannot assert your way to green.
+   */
+  resolve() {
+    const s = store();
+    const items = [payload<any>()].flat();
+    const now = new Date().toISOString();
+    let n = 0;
+
+    for (const p of items) {
+      const kind = p.kind as 'insight' | 'decision' | 'flow' | 'experiment';
+      const rec = s.get(kind, p.id) as any;
+      if (!rec) {
+        console.error(`  skip (no such ${kind}): ${p.id}`);
+        continue;
+      }
+
+      // Re-anchor from the CURRENT code. This is the load-bearing step: it is what actually
+      // moves the trust panel, and it is impossible to fake, because the hash is read from
+      // the index, never supplied by the caller.
+      const reanchor = (as: any[]) =>
+        as.map((a: any) => {
+          const id = a.symbol ? `${a.path}#${a.symbol}` : a.path;
+          const c = s.all('component').find((x) => x.id === id);
+          if (!c) die(`cannot re-anchor "${id}" — it no longer exists. If the code is gone, the claim is BROKEN, not fixed.`);
+          return { path: a.path, ...(a.symbol ? { symbol: a.symbol } : {}), hash: c.hash };
+        });
+
+      if (p.action === 'contradict') {
+        s.put(kind, { ...rec, contradicted: { reason: p.note ?? 'refuted by the current code', ts: now } });
+      } else if (p.action === 'fixed' && kind === 'insight') {
+        s.put('insight', {
+          ...rec,
+          status: 'fixed',
+          resolution: { note: p.note ?? 'fixed', ts: now },
+          evidence: reanchor(rec.evidence ?? []),
+          contradicted: undefined,
+        });
+      } else if (p.action === 'reaffirm') {
+        const patch: any = { ...rec, contradicted: undefined };
+        if (kind === 'flow') {
+          patch.steps = (rec.steps ?? []).map((st: any) => ({ ...st, anchors: reanchor(st.anchors ?? []) }));
+        } else if (kind === 'insight') {
+          patch.evidence = reanchor(rec.evidence ?? []);
+        } else {
+          patch.anchors = reanchor(rec.anchors ?? []);
+        }
+        s.put(kind, patch);
+      } else {
+        die(`unknown action "${p.action}" for ${kind} — use fixed | reaffirm | contradict`);
+      }
+      n++;
+    }
+    console.log(`resolved ${n} claim(s)`);
+  },
+
   jobs() {
     out(new JobQueue(store()).list(flag('status') as any));
   },
