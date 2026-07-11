@@ -101,45 +101,52 @@ export async function healthcheck(repoRoot: string): Promise<Check[]> {
 
   // ── 2. THE CORE THESIS. Does a claim actually notice its code moving? ──
   //
-  // This is the one check that matters. Everything else in this tool is scaffolding around
-  // the proposition that an authored claim flags itself when the code beneath it changes. If
-  // this fails, the product does not work, however green everything else looks.
-  const anchored = store.all('decision').find((d) => d.anchors.length > 0)
-    ?? store.all('flow').find((f) => f.steps.some((s) => s.anchors.length > 0));
+  // The one check that matters. Everything else here is scaffolding around the proposition
+  // that an authored claim flags itself when the code beneath it changes. If this fails, the
+  // product does not work, however green the rest looks.
+  //
+  // Note what this does NOT do: compare aggregate counters. The first version asked "did the
+  // stale total go up?" — and on a store where the chosen claim was already BROKEN, degrading
+  // one of its anchors moved nothing, so it declared the engine dead. Aggregates are a lossy
+  // proxy for the property under test. So: pick an anchor that is currently FRESH, and demand
+  // that THAT anchor, specifically, stops being fresh.
+  const fresh = checkStaleness(store).claims
+    .flatMap((c) => c.anchors.filter((a) => a.freshness === 'fresh').map((a) => ({ claim: c, a })))
+    .find(({ a }) => existsSync(join(repoRoot, a.anchor.path)));
 
-  if (!anchored) {
-    add('THESIS: claims detect code changes', false, 'no anchored claim exists to test with — run /cv-init first');
+  if (!fresh) {
+    add('THESIS: claims detect code changes', false,
+      'no FRESH anchored claim exists to test with — run /cv-init first, or everything is already stale', true);
   } else {
-    const anchor = 'anchors' in anchored
-      ? (anchored as any).anchors[0]
-      : (anchored as any).steps.find((s: any) => s.anchors.length)!.anchors[0];
+    const { path, symbol } = fresh.a.anchor;
+    const id = symbol ? `${path}#${symbol}` : path;
+    const file = join(repoRoot, path);
+    const original = readFileSync(file, 'utf8');
+    const probed = perturb(original, path, symbol);
 
-    const file = join(repoRoot, anchor.path);
-    if (!existsSync(file)) {
-      add('THESIS: claims detect code changes', false, `anchor points at a missing file: ${anchor.path}`, true);
+    if (probed === null) {
+      add('THESIS: claims detect code changes', false,
+        `could not perturb ${id} — probe INCONCLUSIVE, which is not a pass`, true);
     } else {
-      const original = readFileSync(file, 'utf8');
-      const probed = perturb(original, anchor.path, anchor.symbol);
+      try {
+        writeFileSync(file, probed);
+        await new CodeIndexer(repoRoot, new Store(repoRoot)).index();
 
-      if (probed === null) {
-        add('THESIS: claims detect code changes', false,
-          `could not perturb ${anchor.symbol ?? anchor.path} to test with — probe is inconclusive, NOT a pass`, true);
-      } else {
-        const staleBefore = checkStaleness(store).stale;
-        try {
-          writeFileSync(file, probed);
-          await new CodeIndexer(repoRoot, new Store(repoRoot)).index();
-          const staleAfter = checkStaleness(new Store(repoRoot)).stale;
-          const detected = staleAfter > staleBefore;
-          add('THESIS: claims detect code changes', detected,
-            detected
-              ? `stale ${staleBefore} → ${staleAfter} after changing ${anchor.path}${anchor.symbol ? '#' + anchor.symbol : ''}`
-              : `stale stayed at ${staleBefore} after changing ${anchor.path}#${anchor.symbol} — THE STALENESS ENGINE IS NOT WORKING`,
-            true);
-        } finally {
-          writeFileSync(file, original); // always put it back
-          await new CodeIndexer(repoRoot, new Store(repoRoot)).index();
-        }
+        const after = checkStaleness(new Store(repoRoot)).claims
+          .find((c) => c.kind === fresh.claim.kind && c.id === fresh.claim.id);
+        const now = after?.anchors.find(
+          (a) => a.anchor.path === path && a.anchor.symbol === symbol,
+        );
+        const detected = !!now && now.freshness !== 'fresh';
+
+        add('THESIS: claims detect code changes', detected,
+          detected
+            ? `${id} went fresh → ${now!.freshness} in "${fresh.claim.title.slice(0, 40)}" — unprompted`
+            : `changed ${id} and the claim still reports FRESH — THE STALENESS ENGINE IS NOT WORKING`,
+          true);
+      } finally {
+        writeFileSync(file, original); // always put it back
+        await new CodeIndexer(repoRoot, new Store(repoRoot)).index();
       }
     }
   }
