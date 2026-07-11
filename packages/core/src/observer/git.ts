@@ -61,6 +61,37 @@ function isRepo(repoRoot: string): boolean {
 }
 
 /**
+ * Every directory that belongs to this repo — the main checkout plus every git worktree.
+ *
+ * This exists because guessing is not good enough. Worktrees are how serious parallel work
+ * actually happens: one real project had FOURTEEN of them, one per experiment arm
+ * (`gdpr-vocab-gap`, `gdpr-pool-entry`, `gdpr-e9-assembly`…), each a different branch of the
+ * same repo. The sessions run inside them are unambiguously that project's history.
+ *
+ * The naive approach — matching directories by string prefix — is wrong in both directions:
+ * it silently SWALLOWS an unrelated sibling (`/x/gdpr2`, `/x/gdpr-old-backup` both "start
+ * with" `/x/gdpr`), and it MISSES any worktree placed somewhere that doesn't share the
+ * prefix (`/tmp/wt-vocab-gap`). Both failures are quiet, and one of them silently merges two
+ * different projects' histories.
+ *
+ * Git already knows the answer. Ask it.
+ */
+export function worktreeRoots(repoRoot: string): string[] {
+  if (!isRepo(repoRoot)) return [repoRoot];
+  try {
+    const out = git(repoRoot, ['worktree', 'list', '--porcelain']);
+    const roots = out
+      .split('\n')
+      .filter((l) => l.startsWith('worktree '))
+      .map((l) => l.slice('worktree '.length).trim())
+      .filter(Boolean);
+    return roots.length ? roots : [repoRoot];
+  } catch {
+    return [repoRoot]; // old git, or a bare/odd setup — degrade to just this directory
+  }
+}
+
+/**
  * Parse `git log` into commits.
  *
  * Uses NUL-delimited records and a control-char field separator rather than newlines,

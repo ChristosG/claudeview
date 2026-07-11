@@ -3,6 +3,7 @@ import { homedir } from 'node:os';
 import { join, relative, isAbsolute } from 'node:path';
 import type { Store } from '../store.js';
 import type { Event } from '../schema.js';
+import { worktreeRoots } from './git.js';
 
 /**
  * The transcript tailer — the reason this project exists.
@@ -47,16 +48,44 @@ export function slugFor(repoRoot: string): string {
   return repoRoot.replace(/[^a-zA-Z0-9]/g, '-');
 }
 
-/** Every transcript directory that could plausibly belong to this repo. */
+/**
+ * Every directory whose sessions belong to this project: the repo, its git worktrees, and
+ * any subdirectory Claude was invoked inside.
+ *
+ * NOT a string-prefix match on the path. That was the old approach and it is wrong in both
+ * directions: `/x/gdpr2` and `/x/gdpr-old-backup` both "start with" `/x/gdpr` and would be
+ * silently merged into its history, while a worktree at `/tmp/wt-foo` would be invisible.
+ * Git knows exactly which directories are this repo — so we ask it, and only fall back to
+ * the plain root when there is no git at all.
+ */
+export function projectRoots(repoRoot: string): string[] {
+  return worktreeRoots(repoRoot);
+}
+
+/** True if `p` is `root` or lives beneath it. Boundary-safe: `/x/gdpr2` is NOT under `/x/gdpr`. */
+function isUnder(p: string, root: string): boolean {
+  return p === root || p.startsWith(root.endsWith('/') ? root : root + '/');
+}
+
+/** Every transcript directory belonging to this project or any of its worktrees. */
 export function transcriptDirs(repoRoot: string, claudeHome = join(homedir(), '.claude')): string[] {
   const projects = join(claudeHome, 'projects');
   if (!existsSync(projects)) return [];
-  const want = slugFor(repoRoot);
-  return readdirSync(projects)
-    // A subdirectory of the repo (e.g. a monorepo package Claude was invoked inside)
-    // records its own transcripts under its own slug. Those sessions are still ours.
-    .filter((d) => d === want || d.startsWith(want + '-'))
-    .map((d) => join(projects, d));
+
+  const roots = projectRoots(repoRoot);
+  const wanted = roots.map(slugFor);
+  const dirs = readdirSync(projects);
+
+  const out = new Set<string>();
+  for (const want of wanted) {
+    for (const d of dirs) {
+      // Exact slug, or a SUBDIRECTORY of that root (Claude invoked inside a monorepo
+      // package records its own slug). The trailing '-' is a slug path separator, so this
+      // stays boundary-safe in slug space too.
+      if (d === want || d.startsWith(want + '-')) out.add(join(projects, d));
+    }
+  }
+  return [...out];
 }
 
 /**
@@ -274,6 +303,8 @@ function extract(rec: any, repoRoot: string, ctx: FileContext): RawEvent[] {
 
 export class TranscriptTailer {
   private offsetsFile: string;
+  /** The repo plus every git worktree of it. The authority on "is this session ours?". */
+  private roots: string[];
 
   constructor(
     private repoRoot: string,
@@ -281,6 +312,7 @@ export class TranscriptTailer {
     private claudeHome = join(homedir(), '.claude'),
   ) {
     this.offsetsFile = join(store.dir, 'cache', 'offsets.json');
+    this.roots = projectRoots(repoRoot);
   }
 
   private loadOffsets(): Offsets {
@@ -333,10 +365,15 @@ export class TranscriptTailer {
             continue;
           }
           try {
-            // Only records from THIS repo. A transcript dir can legitimately contain
-            // sessions whose cwd moved elsewhere; the slug is lossy, cwd is not.
+            // THE authority on whether a session is ours.
+            //
+            // The directory slug is lossy — `/x/gdpr/sub` and `/x/gdpr-sub` collapse to the
+            // same slug — so the directory scan can only ever propose candidates. This is
+            // where they are accepted or rejected, and it is boundary-safe: a session in the
+            // sibling project `/x/gdpr2` is NOT under `/x/gdpr` and is excluded, while a
+            // session in the worktree `/x/gdpr-vocab-gap` IS ours because git says so.
             const cwd = (rec as any)?.cwd;
-            if (typeof cwd === 'string' && !cwd.startsWith(this.repoRoot)) continue;
+            if (typeof cwd === 'string' && !this.roots.some((r) => isUnder(cwd, r))) continue;
             for (const ev of extract(rec, this.repoRoot, ctx)) {
               // A tool CALL and its RESULT are the same event seen twice: the call knows
               // the tool name and arguments, the result knows the outcome. They share an

@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, appendFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, appendFileSync, rmSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Store } from '../store.js';
@@ -102,6 +103,63 @@ test('ignores a half-written trailing line', () => {
   appendFileSync(transcript, 'ten"}}\n');
   tailer.tail();
   assert.equal(store.all('event').filter((e) => e.type === 'prompt').length, 2);
+});
+
+test('a SIBLING directory sharing a name prefix is NOT this project', () => {
+  const { root, home, transcript } = fixture();
+
+  // `/tmp/cv-repo-x` and `/tmp/cv-repo-x2` are different projects, but a naive
+  // `cwd.startsWith(repoRoot)` says the second is inside the first — and silently merges a
+  // stranger's history into yours. Real instance: `/mnt/nvme2TB/gdpr` vs
+  // `/mnt/nvme2TB/gdpr-frontend`. (That one happened to be a legitimate worktree, which is
+  // exactly why the bug was invisible — it was accidentally right.)
+  writeFileSync(
+    transcript,
+    line({ type: 'user', sessionId: 's1', uuid: 'u1', cwd: root + '-sibling', timestamp: '2026-01-01T00:00:00Z', message: { content: 'a different project' } }) +
+      line({ type: 'user', sessionId: 's1', uuid: 'u2', cwd: root + '/pkg/api', timestamp: '2026-01-01T00:00:01Z', message: { content: 'a subdirectory of ours' } }),
+  );
+
+  const store = new Store(root);
+  new TranscriptTailer(root, store, home).tail();
+
+  const prompts = store.all('event').filter((e) => e.type === 'prompt');
+  assert.equal(prompts.length, 1, 'the sibling must be excluded, the subdirectory kept');
+  assert.equal(prompts[0]!.summary, 'a subdirectory of ours');
+});
+
+test('sessions run inside a git WORKTREE are this project', () => {
+  const root = mkdtempSync(join(tmpdir(), 'cv-wt-'));
+  const home = mkdtempSync(join(tmpdir(), 'cv-home-'));
+  const g = (...args: string[]) => execFileSync('git', ['-C', root, ...args], { stdio: 'ignore' });
+  g('init', '-q');
+  g('config', 'user.email', 'd@e.com');
+  g('config', 'user.name', 'D');
+  writeFileSync(join(root, 'a.txt'), 'a');
+  g('add', '-A');
+  g('commit', '-q', '-m', 'init');
+
+  // The way serious parallel work actually happens: one worktree per experiment arm. A real
+  // project had FOURTEEN. Sessions inside them are unambiguously that project's history, and
+  // a tool that loses them loses most of the work.
+  const wt = root + '-vocab-gap';
+  g('worktree', 'add', '-q', '-b', 'feature/vocab-gap', wt);
+
+  const dir = join(home, 'projects', slugFor(wt));
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    join(dir, 'session.jsonl'),
+    line({ type: 'user', sessionId: 'w1', uuid: 'u1', cwd: wt, timestamp: '2026-01-01T00:00:00Z', message: { content: 'work done in the worktree' } }),
+  );
+
+  const store = new Store(root);
+  new TranscriptTailer(root, store, home).tail();
+
+  const prompts = store.all('event').filter((e) => e.type === 'prompt');
+  assert.equal(prompts.length, 1, 'worktree sessions belong to the repo — git says so');
+  assert.equal(prompts[0]!.summary, 'work done in the worktree');
+
+  rmSync(wt, { recursive: true, force: true });
+  rmSync(root, { recursive: true, force: true });
 });
 
 test('excludes sessions whose cwd is a different repo', () => {
