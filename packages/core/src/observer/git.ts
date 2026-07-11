@@ -135,24 +135,69 @@ export class GitWatcher {
 
     const commits = readCommits(this.repoRoot, this.lastSeen());
 
-    // Which files has Claude actually touched, per our own transcripts? This is what makes
-    // "we were there" a checkable claim rather than an assumption.
+    const events = this.store.all('event');
+
+    // Which files has Claude touched via a file tool (Edit/Write/…)?
     const ourFiles = new Set(
-      this.store.all('event').filter((e) => e.type === 'tool' && e.paths.length).flatMap((e) => e.paths),
+      events.filter((e) => e.type === 'tool' && e.paths.length).flatMap((e) => e.paths),
     );
 
-    const events = commits.map((c) => {
+    // When were we actually AT the keyboard? One window per observed session.
+    //
+    // This is the better signal, and the reason is empirical: on a real project, 45% of
+    // commits looked "foreign" under pure path attribution — because a huge amount of what
+    // Claude does never appears as a file-tool path at all. Eval artifacts get written by a
+    // script Claude ran through Bash. Generated files come out of a build. Merge commits touch
+    // no files whatsoever. None of that is a stranger's work; it is simply invisible to
+    // `Edit.file_path`.
+    //
+    // A commit landing inside a session we recorded is a commit we witnessed, whatever tool
+    // produced the bytes. Getting this wrong is expensive in the most literal sense: every
+    // false "foreign" queues a model to go and explain a change that needs no explaining.
+    const windows: Array<[number, number]> = [];
+    const bySession = new Map<string, { min: number; max: number }>();
+    for (const e of events) {
+      if (e.sessionId === 'git') continue;
+      const t = Date.parse(e.ts);
+      if (Number.isNaN(t)) continue;
+      const w = bySession.get(e.sessionId);
+      if (!w) bySession.set(e.sessionId, { min: t, max: t });
+      else {
+        w.min = Math.min(w.min, t);
+        w.max = Math.max(w.max, t);
+      }
+    }
+    // Grace period: a commit is usually made moments AFTER the work that produced it, often
+    // as the very last act of a session — sometimes just past the final recorded event.
+    const GRACE = 10 * 60_000;
+    for (const w of bySession.values()) windows.push([w.min - GRACE, w.max + GRACE]);
+
+    const witnessed = (ts: string) => {
+      const t = Date.parse(ts);
+      return !Number.isNaN(t) && windows.some(([a, b]) => t >= a && t <= b);
+    };
+
+    const out = commits.map((c) => {
       // ClaudeView's own store is committed alongside the code, so nearly every commit also
       // contains `.claudeview/*.jsonl` — files no tool call ever "edited". Counting those
       // would make EVERY commit look unexplained and queue a pointless reconcile job on each
       // one. The tool's own footprint must be invisible to the tool's own classifier.
       const codePaths = c.paths.filter((p) => !p.startsWith('.claudeview/'));
 
-      // A commit is ours if we watched its files being edited. Attribution by author name
-      // would be wrong here: Claude's commits are authored as YOU, and your hand-edits in
-      // vim are also authored as you — identical on paper, opposite in meaning. What
-      // actually distinguishes them is whether our session history explains the change.
-      const explained = codePaths.length > 0 && codePaths.every((p) => ourFiles.has(p));
+      // A commit is ours if our history accounts for it. Attribution by AUTHOR would be
+      // useless here: Claude's commits are authored as YOU, and your hand-edits in vim are
+      // also authored as you — identical on paper, opposite in meaning.
+      //
+      // Three ways to account for a commit, in descending order of strength:
+      const explained =
+        // 1. It happened while we were watching. The strongest signal, and the one that
+        //    catches everything Bash/scripts/builds produce without a file-tool path.
+        witnessed(c.ts) ||
+        // 2. Every file in it is one we saw edited.
+        (codePaths.length > 0 && codePaths.every((p) => ourFiles.has(p))) ||
+        // 3. It touches no files at all (a merge). There is no content change to explain, so
+        //    sending a model to explain it would be pure waste.
+        c.paths.length === 0;
 
       // Normalise to UTC. Git reports author time in the committer's LOCAL zone with an
       // offset (`…T19:12:00+03:00`); storing those verbatim would make every chronological
@@ -180,7 +225,7 @@ export class GitWatcher {
       };
     });
 
-    const written = this.store.putMany('event', events as any);
+    const written = this.store.putMany('event', out as any);
 
     // Only advance the mark AFTER a successful write. If we crash mid-ingest, the next run
     // re-reads the same commits — which is harmless (the store folds them by sha) and far

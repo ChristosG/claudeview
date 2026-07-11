@@ -1,0 +1,14 @@
+{
+  "name": "@claudeview/cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": { "cv": "./dist/cli.js" },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "echo no tests"
+  },
+  "dependencies": { "@claudeview/core": "workspace:*" },
+  "devDependencies": { "@types/node": "^24.0.0", "typescript": "^5.7.2" }
+}
