@@ -75,7 +75,14 @@ function readCommits(repoRoot: string, since: string | null): GitCommit[] {
   let raw: string;
   try {
     raw = git(repoRoot, [
-      'log', ...range, `--pretty=format:%H${SEP}%an${SEP}%ae${SEP}%aI${SEP}%s${REC}`, '--name-only',
+      'log',
+      ...range,
+      // The record separator must LEAD each record, not trail it. `--name-only` prints the
+      // changed files AFTER the pretty-format, so a trailing separator pushes them into the
+      // next chunk — where they get parsed as a commit, and every commit spawns a phantom
+      // sibling named after its own file. Leading it keeps each commit and its files together.
+      `--pretty=format:${REC}%H${SEP}%an${SEP}%ae${SEP}%aI${SEP}%s`,
+      '--name-only',
     ]);
   } catch {
     // `since` may name a commit that no longer exists (a rebase, a force-push, a reset).
@@ -135,16 +142,31 @@ export class GitWatcher {
     );
 
     const events = commits.map((c) => {
+      // ClaudeView's own store is committed alongside the code, so nearly every commit also
+      // contains `.claudeview/*.jsonl` — files no tool call ever "edited". Counting those
+      // would make EVERY commit look unexplained and queue a pointless reconcile job on each
+      // one. The tool's own footprint must be invisible to the tool's own classifier.
+      const codePaths = c.paths.filter((p) => !p.startsWith('.claudeview/'));
+
       // A commit is ours if we watched its files being edited. Attribution by author name
       // would be wrong here: Claude's commits are authored as YOU, and your hand-edits in
       // vim are also authored as you — identical on paper, opposite in meaning. What
       // actually distinguishes them is whether our session history explains the change.
-      const explained = c.paths.length > 0 && c.paths.every((p) => ourFiles.has(p));
+      const explained = codePaths.length > 0 && codePaths.every((p) => ourFiles.has(p));
+
+      // Normalise to UTC. Git reports author time in the committer's LOCAL zone with an
+      // offset (`…T19:12:00+03:00`); storing those verbatim would make every chronological
+      // sort in the store quietly wrong the moment a teammate in another timezone pushes.
+      const ts = (() => {
+        const d = new Date(c.ts);
+        return Number.isNaN(d.getTime()) ? new Date().toISOString() : d.toISOString();
+      })();
+
       return {
         id: `commit:${c.sha}`,
         sessionId: 'git',
         provenance: 'observed' as const,
-        ts: c.ts || new Date().toISOString(),
+        ts,
         type: 'commit' as const,
         agent: { type: 'main' as const },
         paths: c.paths,

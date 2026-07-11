@@ -1,0 +1,273 @@
+@import '@fontsource/jetbrains-mono/400.css';
+@import '@fontsource/jetbrains-mono/500.css';
+@import '@fontsource/jetbrains-mono/700.css';
+@import '@fontsource/chakra-petch/500.css';
+@import '@fontsource/chakra-petch/600.css';
+@import '@fontsource/chakra-petch/700.css';
+
+/*
+  ClaudeView — an instrument, not a dashboard.
+  The reference isn't a SaaS admin panel; it's a flight-data recorder: phosphor on black,
+  hairline rules, dense tabular data, and a status readout you cannot look away from.
+
+  Fonts are bundled (@fontsource), never fetched. A tool you open to find out what's going
+  on must not depend on the network to render.
+*/
+
+:root {
+  --bg: #080a0d;
+  --bg-lift: #0d1116;
+  --panel: #10151b;
+  --panel-2: #141b23;
+  --line: #1c2530;
+  --line-bright: #2a3644;
+
+  --ink: #ccd7e1;
+  --ink-bright: #f0f6fb;
+  --ink-dim: #5f7183;
+  --ink-faint: #394654;
+
+  /* The semantic core. These four colours ARE the product — everything else is chrome. */
+  --ok: #2ee6a8;        /* verified against the code */
+  --warn: #f6a723;      /* the code moved; this claim may be lying */
+  --bad: #ff4d4d;       /* the code is GONE */
+  --crit: #ff2d6f;      /* a model read the new code: this claim is WRONG */
+  --unknown: #5f7183;   /* cites no code — unverifiable by construction */
+
+  --acc: #6ee7ff;       /* instrument cyan: interactive things */
+
+  --mono: 'JetBrains Mono', ui-monospace, monospace;
+  --display: 'Chakra Petch', var(--mono);
+
+  --rail: 208px;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body, #root { height: 100%; }
+
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+}
+
+/* Atmosphere: a faint CRT grain + a cold vignette. Barely perceptible, but it stops the
+   black from reading as "flat #000 div" and gives the panel depth. */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 9999;
+  background-image: repeating-linear-gradient(0deg, rgba(255,255,255,.014) 0 1px, transparent 1px 3px);
+  mix-blend-mode: overlay;
+}
+
+/* ── When something is stale, the whole instrument knows it. ─────────────────────────
+   This is the single most important rule in the file. Trust is not a screen you have to
+   remember to visit — it is the frame around everything you look at. */
+#root[data-trust='stale']  { box-shadow: inset 0 0 0 1px var(--warn), inset 0 0 40px -8px rgba(246,167,35,.28); }
+#root[data-trust='broken'] { box-shadow: inset 0 0 0 1px var(--bad),  inset 0 0 44px -8px rgba(255,77,77,.30); }
+#root[data-trust='contradicted'] { box-shadow: inset 0 0 0 1px var(--crit), inset 0 0 48px -6px rgba(255,45,111,.34); }
+#root { transition: box-shadow .5s ease; height: 100%; }
+
+/* ── Layout ─────────────────────────────────────────────────────────────────────── */
+.app { display: grid; grid-template-columns: var(--rail) 1fr; height: 100%; }
+
+.rail {
+  border-right: 1px solid var(--line);
+  background: linear-gradient(180deg, var(--bg-lift), var(--bg));
+  display: flex; flex-direction: column;
+  min-height: 0;
+}
+
+.brand {
+  padding: 18px 16px 14px;
+  border-bottom: 1px solid var(--line);
+}
+.brand h1 {
+  font-family: var(--display);
+  font-size: 17px; font-weight: 700; letter-spacing: .14em;
+  color: var(--ink-bright); text-transform: uppercase;
+}
+.brand .repo {
+  margin-top: 5px; font-size: 10px; color: var(--ink-faint);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; direction: rtl; text-align: left;
+}
+
+nav { padding: 8px 0; flex: 1; overflow-y: auto; }
+nav button {
+  display: flex; align-items: center; gap: 10px; width: 100%;
+  padding: 8px 16px; background: none; border: 0; border-left: 2px solid transparent;
+  color: var(--ink-dim); font-family: var(--mono); font-size: 12px; letter-spacing: .04em;
+  cursor: pointer; text-align: left; transition: all .12s;
+}
+nav button:hover { color: var(--ink); background: var(--panel); }
+nav button[data-on='1'] {
+  color: var(--ink-bright); background: var(--panel-2);
+  border-left-color: var(--acc);
+}
+nav button .n {
+  margin-left: auto; font-size: 10px; color: var(--ink-faint);
+  padding: 1px 5px; border: 1px solid var(--line-bright); border-radius: 2px;
+}
+nav button[data-alert='1'] .n { color: var(--warn); border-color: var(--warn); }
+
+.main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+
+/* ── The Trust Bar: the thing you cannot not see. ────────────────────────────────── */
+.trustbar {
+  display: flex; align-items: center; gap: 14px;
+  padding: 0 18px; height: 46px;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-lift);
+  flex-shrink: 0;
+}
+.trustbar .label {
+  font-family: var(--display); font-size: 10px; letter-spacing: .18em;
+  text-transform: uppercase; color: var(--ink-faint);
+}
+.segments { display: flex; flex: 1; height: 8px; gap: 2px; background: var(--line); padding: 1px; border-radius: 1px; }
+.segments i { display: block; height: 100%; transition: flex .4s ease; }
+.segments i[data-k='fresh']  { background: var(--ok);   box-shadow: 0 0 8px -1px var(--ok); }
+.segments i[data-k='stale']  { background: var(--warn); box-shadow: 0 0 10px -1px var(--warn); animation: breathe 2s ease-in-out infinite; }
+.segments i[data-k='broken'] { background: var(--bad);  box-shadow: 0 0 10px -1px var(--bad); animation: breathe 1.4s ease-in-out infinite; }
+.segments i[data-k='contradicted'] { background: var(--crit); box-shadow: 0 0 12px 0 var(--crit); animation: breathe 1s ease-in-out infinite; }
+.segments i[data-k='unanchored'] { background: repeating-linear-gradient(45deg, var(--unknown) 0 2px, transparent 2px 5px); }
+
+@keyframes breathe { 0%,100% { opacity: 1; } 50% { opacity: .45; } }
+
+.tallies { display: flex; gap: 12px; font-size: 11px; }
+.tally { display: flex; align-items: center; gap: 5px; color: var(--ink-dim); }
+.tally b { color: var(--ink-bright); font-weight: 500; }
+.tally .dot { width: 6px; height: 6px; border-radius: 50%; }
+
+.live { display: flex; align-items: center; gap: 6px; font-size: 10px; color: var(--ink-faint); letter-spacing: .1em; }
+.live .pip { width: 6px; height: 6px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 8px var(--ok); }
+.live[data-stale='1'] .pip { background: var(--ink-faint); box-shadow: none; }
+
+/* ── Content ────────────────────────────────────────────────────────────────────── */
+.content { flex: 1; overflow-y: auto; padding: 22px 24px 60px; min-height: 0; }
+.content > header { margin-bottom: 20px; }
+.content > header h2 {
+  font-family: var(--display); font-size: 22px; font-weight: 600;
+  letter-spacing: .06em; text-transform: uppercase; color: var(--ink-bright);
+}
+.content > header p { color: var(--ink-dim); font-size: 12px; margin-top: 3px; max-width: 70ch; }
+
+/* align-items:start — otherwise a short card is stretched to match a tall sibling and the
+   page fills with dead space that reads as "something failed to load". */
+.grid { display: grid; gap: 12px; align-items: start; }
+.g4 { grid-template-columns: repeat(4, 1fr); }
+.g3 { grid-template-columns: repeat(3, 1fr); }
+.g2 { grid-template-columns: 1fr 1fr; }
+@media (max-width: 1100px) { .g4, .g3, .g2 { grid-template-columns: 1fr 1fr; } }
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 2px;
+  padding: 14px;
+  position: relative;
+}
+.card h3 {
+  font-family: var(--display); font-size: 10px; font-weight: 600;
+  letter-spacing: .16em; text-transform: uppercase; color: var(--ink-faint);
+  margin-bottom: 10px;
+}
+
+.stat { font-family: var(--display); font-size: 30px; font-weight: 700; color: var(--ink-bright); line-height: 1; }
+.stat small { font-size: 11px; color: var(--ink-dim); font-family: var(--mono); font-weight: 400; margin-left: 6px; }
+
+/* ── Badges: freshness, everywhere, always the same colours. ─────────────────────── */
+.badge {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 9px; letter-spacing: .12em; text-transform: uppercase;
+  padding: 2px 6px; border-radius: 2px; border: 1px solid currentColor;
+  font-weight: 500;
+}
+.badge[data-k='fresh'] { color: var(--ok); }
+.badge[data-k='stale'] { color: var(--warn); background: rgba(246,167,35,.08); }
+.badge[data-k='broken'] { color: var(--bad); background: rgba(255,77,77,.09); }
+.badge[data-k='contradicted'] { color: var(--crit); background: rgba(255,45,111,.10); }
+.badge[data-k='info'], .badge[data-k='low'] { color: var(--ink-dim); }
+.badge[data-k='medium'] { color: var(--warn); }
+.badge[data-k='high'] { color: var(--bad); }
+.badge[data-k='critical'] { color: var(--crit); background: rgba(255,45,111,.10); }
+.badge[data-k='observed'] { color: var(--ok); }
+.badge[data-k='authored'] { color: var(--acc); }
+.badge[data-k='inferred'] { color: var(--warn); }
+
+/* ── Tables: dense, tabular, no zebra stripes, hairlines only. ───────────────────── */
+table { width: 100%; border-collapse: collapse; font-size: 12px; }
+th {
+  text-align: left; font-family: var(--display); font-size: 9px; font-weight: 600;
+  letter-spacing: .16em; text-transform: uppercase; color: var(--ink-faint);
+  padding: 6px 10px; border-bottom: 1px solid var(--line-bright);
+}
+td { padding: 7px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+tbody tr:hover { background: var(--panel-2); }
+td.num { text-align: right; font-variant-numeric: tabular-nums; }
+
+.path { color: var(--ink); font-size: 11px; }
+.dim { color: var(--ink-dim); }
+.faint { color: var(--ink-faint); }
+
+/* The hash chip: the abstraction made physically visible. This is a real content hash of
+   real source, and when it drifts the box turns amber. */
+.hash {
+  font-size: 9px; letter-spacing: .06em;
+  color: var(--ink-dim);            /* --ink-faint was unreadable on the panel background */
+  background: var(--bg);
+  border: 1px solid var(--line-bright); border-radius: 2px; padding: 1px 5px;
+  white-space: nowrap;
+}
+.hash[data-k='stale'], .hash[data-k='broken'] { color: var(--warn); border-color: var(--warn); }
+
+button.act {
+  background: var(--panel-2); border: 1px solid var(--line-bright); color: var(--ink);
+  font-family: var(--mono); font-size: 11px; padding: 5px 11px; border-radius: 2px;
+  cursor: pointer; transition: all .12s; letter-spacing: .04em;
+}
+button.act:hover { border-color: var(--acc); color: var(--acc); box-shadow: 0 0 12px -4px var(--acc); }
+button.act:disabled { opacity: .4; cursor: default; }
+
+.empty {
+  border: 1px dashed var(--line-bright); border-radius: 2px;
+  padding: 28px; text-align: center; color: var(--ink-dim); font-size: 12px;
+}
+.empty b { color: var(--ink); display: block; margin-bottom: 6px; font-weight: 500; }
+
+/* Bars are capped and left-aligned. With `flex:1` and a single data point, one day of
+   activity rendered as a full-width cyan slab — technically a correct bar chart, and
+   completely absurd to look at. */
+.spark { display: flex; align-items: flex-end; justify-content: flex-start; gap: 3px; height: 40px; }
+.spark i {
+  flex: 1 1 auto; max-width: 26px; min-width: 6px;
+  background: var(--acc); opacity: .55; border-radius: 1px 1px 0 0; min-height: 2px;
+}
+.spark i:last-child { opacity: 1; }
+
+/* ── Flow map ───────────────────────────────────────────────────────────────────── */
+.react-flow__node { font-family: var(--mono); }
+.flownode {
+  background: var(--panel-2); border: 1px solid var(--line-bright);
+  border-radius: 2px; padding: 10px 12px; width: 208px;
+}
+.flownode[data-k='stale'] {
+  border-color: var(--warn);
+  box-shadow: 0 0 0 1px var(--warn), 0 0 22px -6px var(--warn);
+}
+.flownode .lbl { font-family: var(--display); font-size: 12px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-bright); }
+.flownode .desc { font-size: 10px; color: var(--ink-dim); margin: 5px 0 7px; line-height: 1.4; }
+.flownode .anchors { display: flex; flex-wrap: wrap; gap: 3px; }
+.react-flow__edge-path { stroke: var(--line-bright); stroke-width: 1.5; }
+.react-flow__handle { background: var(--acc); border: 0; width: 5px; height: 5px; }
+.react-flow__attribution { display: none; }
+
+.scroll-x { overflow-x: auto; }

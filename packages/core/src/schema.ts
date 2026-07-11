@@ -56,7 +56,13 @@ const Base = {
    * what lets two machines write the same object and still merge cleanly in git.
    */
   rev: z.number().int().nonnegative().default(0),
-  ts: z.string().datetime(),
+  /**
+   * `offset: true` is load-bearing. Timestamps do not only come from `new Date()` — git
+   * reports author time as ISO-8601 WITH a zone offset (`…T19:12:00+03:00`), and Zod's
+   * default `.datetime()` accepts only UTC `Z` and rejects every one of them. That failed
+   * the whole commit ingest at validation and aborted the sync.
+   */
+  ts: z.string().datetime({ offset: true }),
   /** Stable id of the machine/session that wrote this. Breaks ties when revs collide. */
   actor: z.string(),
   provenance: Provenance,

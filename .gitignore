@@ -8,3 +8,6 @@ dist/
 # ClaudeView's own derived index — a pure function of .claudeview/*.jsonl,
 # rebuilt in seconds. Never committed: a binary blob would only buy merge conflicts.
 .claudeview/cache/
+
+# Playwright screenshots from local verification
+.playwright-mcp/
