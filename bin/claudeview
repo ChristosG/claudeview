@@ -1,12 +1,17 @@
 #!/usr/bin/env bash
 #
-# claudeview — start Claude Code in the current project with ClaudeView attached.
+# claudeview — Claude Code in the current project, with ClaudeView attached.
 #
-#   claudeview                              # this project, dashboard auto-starts
-#   claudeview --dangerously-skip-permissions
-#   claudeview --no-dashboard               # plugin only, no browser, no server
+#   claudeview                  # plugin + dashboard + --dangerously-skip-permissions
+#   claudeview --safe           # ...without skip-permissions, for when you want the prompts
+#   claudeview --no-dashboard   # plugin only; no server, no browser
 #
-# Any extra flags are passed straight through to `claude`.
+# Any other flags pass straight through to `claude`.
+#
+# Note on --dangerously-skip-permissions: it is ON by default here because this is a
+# personal, single-operator entrypoint and being prompted for every read on a 30k-LOC repo
+# is untenable. It does mean an agent can run anything without asking. `--safe` turns it off
+# for one invocation; nothing else about the session changes.
 #
 set -euo pipefail
 
@@ -18,25 +23,30 @@ if [[ ! -f "$CV_ROOT/.claude-plugin/plugin.json" ]]; then
   exit 1
 fi
 
-# One dashboard per project, on a stable port.
+# One dashboard per project, on a STABLE port derived from the repo path.
 #
-# The port is derived from a hash of the repo path rather than allocated dynamically, so the
-# same project always lands on the same URL. That matters more than it sounds: a dashboard you
-# keep open in a pinned browser tab is one you actually glance at, and a tool whose address
-# moves every session is one you stop opening.
+# Stability matters more than it sounds: a dashboard you can keep in a pinned browser tab is
+# one you actually glance at. One whose address moves every session is one you stop opening.
 PORT=$(( 7800 + $(printf '%s' "$REPO" | cksum | cut -d' ' -f1) % 180 ))
 
 WANT_DASH=1
+SKIP_PERMS=1
 ARGS=()
 for a in "$@"; do
-  if [[ "$a" == "--no-dashboard" ]]; then WANT_DASH=0; else ARGS+=("$a"); fi
+  case "$a" in
+    --no-dashboard) WANT_DASH=0 ;;
+    --safe)         SKIP_PERMS=0 ;;
+    *)              ARGS+=("$a") ;;
+  esac
 done
+
+[[ "$SKIP_PERMS" == "1" ]] && ARGS+=(--dangerously-skip-permissions)
 
 if [[ "$WANT_DASH" == "1" ]]; then
   if curl -sf -m 1 "http://localhost:$PORT/api/pulse" >/dev/null 2>&1; then
     echo "claudeview: dashboard already up → http://localhost:$PORT"
   elif [[ -f "$CV_ROOT/packages/server/dist/server.js" ]]; then
-    # Detached, and its own failure must never block the session it is only observing.
+    # Detached. Its failure must never block the session it only observes.
     CLAUDE_PROJECT_DIR="$REPO" CV_PORT="$PORT" \
       nohup node "$CV_ROOT/packages/server/dist/server.js" \
       >"${TMPDIR:-/tmp}/claudeview-$PORT.log" 2>&1 &

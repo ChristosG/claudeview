@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+#
+# clauded — plain Claude Code, permissions skipped. No plugin, no dashboard, no ClaudeView.
+#
+#   clauded              # claude --dangerously-skip-permissions
+#   clauded --safe       # ...without it, i.e. just `claude`
+#
+# Everything else passes straight through.
+#
+set -euo pipefail
+
+SKIP_PERMS=1
+ARGS=()
+for a in "$@"; do
+  if [[ "$a" == "--safe" ]]; then SKIP_PERMS=0; else ARGS+=("$a"); fi
+done
+
+[[ "$SKIP_PERMS" == "1" ]] && ARGS+=(--dangerously-skip-permissions)
+
+exec claude ${ARGS[@]+"${ARGS[@]}"}
