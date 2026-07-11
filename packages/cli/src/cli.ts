@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { Store, JobQueue, sync, buildBrief, checkStaleness, needsAttention, MODEL_FOR_TIER, protectStore, listSnapshots } from '@claudeview/core';
+import { Store, JobQueue, sync, buildBrief, checkStaleness, needsAttention, MODEL_FOR_TIER, protectStore, listSnapshots, healthcheck } from '@claudeview/core';
 
 /**
  * The `cv` CLI — ClaudeView's write surface for agents that are not the main session.
@@ -276,6 +276,27 @@ const commands: Record<string, () => Promise<void> | void> = {
       console.log(`  ${s.at}   ${(s.records / 1024).toFixed(0).padStart(6)} KB   ${s.dir}`);
     }
     console.log(`\nTo restore:  cp <dir>/*.jsonl ${repo}/.claudeview/`);
+  },
+
+  /** Does it actually work, right now, on this repo? Drives the real thing and asks. */
+  async doctor() {
+    const checks = await healthcheck(repo);
+    const bad = checks.filter((c) => !c.ok);
+    console.log(`ClaudeView health — ${repo}\n`);
+    for (const c of checks) {
+      const mark = c.ok ? ' ok ' : (c.critical ? 'FAIL' : 'warn');
+      console.log(`  [${mark}] ${c.name}`);
+      console.log(`         ${c.detail}`);
+    }
+    const criticals = bad.filter((c) => c.critical);
+    console.log(
+      criticals.length
+        ? `\n${criticals.length} CRITICAL failure(s). The tool is not trustworthy in this state.`
+        : bad.length
+          ? `\n${bad.length} warning(s), nothing critical.`
+          : `\nAll ${checks.length} checks pass.`,
+    );
+    if (criticals.length) process.exitCode = 1;
   },
 
   jobs() {

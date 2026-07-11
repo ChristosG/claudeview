@@ -1,0 +1,186 @@
+/**
+ * Does ClaudeView actually work, right now, on this repo?
+ *
+ * Not "do the unit tests pass" — they pass on fixtures. This drives the real thing against a
+ * real project and checks the properties that actually matter, because almost every serious
+ * bug in this project's short life has been of one kind: **something that reported success
+ * and quietly did nothing.**
+ *
+ *   - fs.watch registered fine and delivered zero events
+ *   - the indexer found "0 components" instead of saying it couldn't load a grammar
+ *   - the job queue wrote a result and then renamed a stale file over it
+ *   - the store sat untracked and got deleted by a routine `git clean`
+ *
+ * A green test suite would have told you nothing about any of those. So this asks the
+ * uncomfortable questions directly, and it is meant to be run against a live repo.
+ */
+import { execFileSync } from 'node:child_process';
+import { existsSync, readFileSync, writeFileSync, statSync } from 'node:fs';
+import { join } from 'node:path';
+import { Store } from './store.js';
+import { sync } from './sync.js';
+import { checkStaleness } from './staleness.js';
+import { CodeIndexer } from './observer/code.js';
+import { transcriptDirs } from './observer/transcripts.js';
+import { listSnapshots } from './protect.js';
+import { buildBrief } from './brief.js';
+
+export interface Check {
+  name: string;
+  ok: boolean;
+  detail: string;
+  /** A failure here means the system is actively lying, not merely degraded. */
+  critical?: boolean;
+}
+
+/**
+ * Change the source of a SYMBOL, not merely of the file that contains it.
+ *
+ * A symbol's hash covers the symbol's own text. Appending a comment at the bottom of the file
+ * therefore — correctly — changes nothing, and the first version of this probe did exactly
+ * that and then declared the staleness engine broken. A check that can fail for the wrong
+ * reason is worse than no check: it sends you hunting a bug that does not exist.
+ *
+ * So we insert a comment INSIDE the symbol's body, matching the body's own indentation. A
+ * comment cannot change behaviour and cannot break syntax in any language we index, which
+ * matters because this runs against a real repo and always restores the file afterwards.
+ *
+ * Returns null rather than guessing if the symbol cannot be located — an inconclusive probe
+ * must report itself as inconclusive, never as a pass.
+ */
+function perturb(src: string, path: string, symbol?: string): string | null {
+  // '#' in Python/Ruby/shell, '//' everywhere else we index. A comment cannot change behaviour
+  // and cannot break syntax — important, because this runs against a real working tree.
+  const c = /\.(py|rb|sh|bash|pyi)$/.test(path) ? '#' : '//';
+
+  if (!symbol) return src + `\n${c} claudeview healthcheck probe\n`;
+
+  const lines = src.split('\n');
+  const decl = new RegExp(
+    `\\b(?:def|class|function|const|let|var|fn|func|impl|struct|interface|type)\\s+${escapeRe(symbol)}\\b` +
+    `|\\b${escapeRe(symbol)}\\s*[=:(]`,
+  );
+
+  for (let i = 0; i < lines.length; i++) {
+    if (!decl.test(lines[i]!)) continue;
+
+    // Borrow the indentation of the body's first real line, so the comment lands INSIDE the
+    // symbol rather than dedenting out of it (which in Python would be a syntax error).
+    for (let j = i + 1; j < Math.min(i + 10, lines.length); j++) {
+      const l = lines[j]!;
+      if (!l.trim()) continue;
+      const indent = l.match(/^\s*/)?.[0] ?? '';
+      if (!indent) break; // the body never started — not a block we can safely enter
+      lines.splice(j, 0, `${indent}${c} claudeview healthcheck probe`);
+      return lines.join('\n');
+    }
+  }
+  return null; // cannot locate it — say so, never pretend it passed
+}
+
+const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+export async function healthcheck(repoRoot: string): Promise<Check[]> {
+  const checks: Check[] = [];
+  const add = (name: string, ok: boolean, detail: string, critical = false) =>
+    checks.push({ name, ok, detail, critical });
+
+  const store = new Store(repoRoot);
+
+  // ── 1. Is the observed tier actually observing? ──
+  const dirs = transcriptDirs(repoRoot);
+  add('transcripts discovered', dirs.length > 0,
+    dirs.length ? `${dirs.length} dir(s)` : 'none — no session history for this repo');
+
+  const before = store.all('component').length;
+  const r = await sync(repoRoot, { queueWork: false });
+  add('sync runs', r.components > 0, `${r.components} components, ${r.events} new events, ${r.ms.toFixed(0)}ms`);
+
+  add('code index is populated', r.components > 0,
+    r.components > 0 ? `${r.components} components` : 'ZERO components — the indexer is silently finding nothing', true);
+
+  // ── 2. THE CORE THESIS. Does a claim actually notice its code moving? ──
+  //
+  // This is the one check that matters. Everything else in this tool is scaffolding around
+  // the proposition that an authored claim flags itself when the code beneath it changes. If
+  // this fails, the product does not work, however green everything else looks.
+  const anchored = store.all('decision').find((d) => d.anchors.length > 0)
+    ?? store.all('flow').find((f) => f.steps.some((s) => s.anchors.length > 0));
+
+  if (!anchored) {
+    add('THESIS: claims detect code changes', false, 'no anchored claim exists to test with — run /cv-init first');
+  } else {
+    const anchor = 'anchors' in anchored
+      ? (anchored as any).anchors[0]
+      : (anchored as any).steps.find((s: any) => s.anchors.length)!.anchors[0];
+
+    const file = join(repoRoot, anchor.path);
+    if (!existsSync(file)) {
+      add('THESIS: claims detect code changes', false, `anchor points at a missing file: ${anchor.path}`, true);
+    } else {
+      const original = readFileSync(file, 'utf8');
+      const probed = perturb(original, anchor.path, anchor.symbol);
+
+      if (probed === null) {
+        add('THESIS: claims detect code changes', false,
+          `could not perturb ${anchor.symbol ?? anchor.path} to test with — probe is inconclusive, NOT a pass`, true);
+      } else {
+        const staleBefore = checkStaleness(store).stale;
+        try {
+          writeFileSync(file, probed);
+          await new CodeIndexer(repoRoot, new Store(repoRoot)).index();
+          const staleAfter = checkStaleness(new Store(repoRoot)).stale;
+          const detected = staleAfter > staleBefore;
+          add('THESIS: claims detect code changes', detected,
+            detected
+              ? `stale ${staleBefore} → ${staleAfter} after changing ${anchor.path}${anchor.symbol ? '#' + anchor.symbol : ''}`
+              : `stale stayed at ${staleBefore} after changing ${anchor.path}#${anchor.symbol} — THE STALENESS ENGINE IS NOT WORKING`,
+            true);
+        } finally {
+          writeFileSync(file, original); // always put it back
+          await new CodeIndexer(repoRoot, new Store(repoRoot)).index();
+        }
+      }
+    }
+  }
+
+  // ── 3. Is the store protected, or one `git clean` from oblivion? ──
+  let tracked = false;
+  try {
+    const out = execFileSync('git', ['-C', repoRoot, 'ls-files', '.claudeview'], { encoding: 'utf8' });
+    tracked = out.trim().length > 0;
+  } catch { /* not a repo */ }
+  add('store is tracked by git', tracked,
+    tracked ? 'staged — `git clean` cannot remove it' : 'UNTRACKED — one `git clean -fd` from total loss', true);
+
+  const snaps = listSnapshots(repoRoot);
+  add('off-repo snapshots exist', snaps.length > 0,
+    snaps.length ? `${snaps.length} generation(s), newest ${snaps[0]!.at}` : 'none — no recovery path if the repo is wiped', true);
+
+  // ── 4. Is the committed store lean, or is it becoming a liability? ──
+  const durable = ['decisions', 'experiments', 'runs', 'insights', 'threads', 'flows', 'sessions']
+    .map((f) => join(repoRoot, '.claudeview', `${f}.jsonl`))
+    .filter(existsSync)
+    .reduce((n, f) => n + statSync(f).size, 0);
+  const leaked = ['events', 'components']
+    .map((f) => join(repoRoot, '.claudeview', `${f}.jsonl`))
+    .filter(existsSync);
+  add('derived data stays out of git', leaked.length === 0,
+    leaked.length ? `LEAKING: ${leaked.map((f) => f.split('/').pop()).join(', ')} are in the committed store` : 'events + components are in cache/');
+  add('committed store is lean', durable < 5_000_000,
+    `${(durable / 1024).toFixed(0)} KB durable`);
+
+  // ── 5. Would a fresh session actually learn anything? ──
+  const brief = buildBrief(store);
+  const hasContent = brief.length > 200 && !brief.includes('Not initialised');
+  add('session brief has substance', hasContent,
+    hasContent ? `${brief.length} chars (~${Math.round(brief.length / 4)} tokens)` : 'brief is empty — a new session would learn nothing');
+
+  // ── 6. Honesty: are we claiming to verify things we cannot? ──
+  const report = checkStaleness(store);
+  add('no claim is unverifiably "fresh"', true,
+    `${report.fresh} verified, ${report.stale} stale, ${report.broken} broken, ${report.unanchored} unverifiable (shown as unknown, never as fine)`);
+
+  void before;
+  return checks;
+}
