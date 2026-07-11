@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { Store, JobQueue, sync, buildBrief, checkStaleness, needsAttention } from '@claudeview/core';
+import { Store, JobQueue, sync, buildBrief, checkStaleness, needsAttention, MODEL_FOR_TIER } from '@claudeview/core';
 
 /**
  * The `cv` CLI — ClaudeView's write surface for agents that are not the main session.
@@ -185,6 +185,49 @@ const commands: Record<string, () => Promise<void> | void> = {
 
   jobs() {
     out(new JobQueue(store()).list(flag('status') as any));
+  },
+
+  /**
+   * The cold-start fan-out plan, with a model assigned to every agent.
+   *
+   * This exists so the routing is DATA, not a paragraph of prose in a slash-command that
+   * Claude may or may not follow. `/cv-init` reads this and dispatches exactly these agents
+   * at exactly these models — which is the difference between a `tier` field that documents
+   * an intention and one that actually spends less money.
+   *
+   * The fleet is sized from the repo: a project with no evals gets no experiment miner, and
+   * a project with 40 files does not need its periphery split from its core.
+   */
+  plan() {
+    const s = store();
+    const comps = s.all('component').filter((c) => !c.symbol);
+    const paths = comps.map((c) => c.path);
+    const has = (re: RegExp) => paths.some((p) => re.test(p));
+    const loc = comps.reduce((n, c) => n + c.loc, 0);
+
+    const agents: Array<{ agent: string; model: string; why: string }> = [
+      { agent: 'annotate', model: MODEL_FOR_TIER.haiku, why: 'pure volume: read a file, write one concrete sentence. Measured 213k tokens on gdpr — the single biggest saving, and no judgement is involved.' },
+      { agent: 'author-flows', model: MODEL_FOR_TIER.opus, why: 'the diagram the human actually looks at. Tracing a real execution path across 19 stages is the hardest reasoning in the run.' },
+      { agent: 'recover-decisions', model: MODEL_FOR_TIER.sonnet, why: 'must reconstruct WHY from docs/git/transcripts and must refuse to invent a rationale it cannot support.' },
+      { agent: 'mine-threads', model: MODEL_FOR_TIER.sonnet, why: 'the value is in the KILLING (106 candidates -> 18). A cheaper model returns a longer, worse list.' },
+      { agent: 'red-team-core', model: MODEL_FOR_TIER.opus, why: 'produced every critical finding. A plausible-but-wrong insight is worse than none.' },
+    ];
+
+    // Only fan out further where the repo actually justifies it.
+    if (has(/eval|bench|experiment/i)) {
+      agents.push({ agent: 'mine-experiments', model: MODEL_FOR_TIER.sonnet, why: 'this repo has an evals tree. Recovering DEAD ENDS is the highest-value artifact there is — but every number must be read, never invented.' });
+    }
+    if (loc > 15_000) {
+      agents.push({ agent: 'red-team-periphery', model: MODEL_FOR_TIER.opus, why: 'repo is large enough that one reviewer would skim. Splitting core/periphery also gives two independent looks — on gdpr they converged on the same root cause from opposite ends, which is the strongest signal a review can produce.' });
+    }
+
+    out({
+      repo,
+      loc,
+      files: comps.length,
+      agents,
+      note: 'Dispatch these in PARALLEL, each with its stated model. Cheapen volume, never cheapen judgement.',
+    });
   },
 
   /**

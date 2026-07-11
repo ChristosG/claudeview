@@ -15,6 +15,23 @@ Call `cv_sync` with `queueWork: true`. This reads every transcript for this proj
 
 Report what it found: events, components, commits, and anything already stale.
 
+## Phase 1.5 — Get the fan-out plan, and FOLLOW IT
+
+Run:
+
+```bash
+node ${CLAUDE_PLUGIN_ROOT}/packages/cli/dist/cli.js plan --repo <repo>
+```
+
+It returns the agent fleet with a **model assigned to each one**. Dispatch them **in parallel**, each with the model it names — pass `model:` on the Agent tool.
+
+This is not advisory. The assignments are calibrated against a real measured cold-start (1,318,993 output tokens on a 30k-LOC repo), and the routing exists because **volume work and judgement work are not the same job**:
+
+- **Annotation is volume** — read a file, write one concrete sentence. It was the 2nd most expensive agent in the measured run and needs no frontier model. Haiku.
+- **Red-teaming and flow-authoring are judgement.** They produced every critical finding. A confident, plausible, *wrong* insight is worse than silence — so they do NOT get cheapened, ever.
+
+Cheapen volume. Never cheapen judgement.
+
 ## Phase 2 — Explain the structure
 
 The index knows the *shape* of the code but nothing about its *meaning*. Read the most important components (start with the ones the session history touched most — those are where the project's attention actually went) and give them a purpose.

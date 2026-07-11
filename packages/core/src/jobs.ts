@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync, writeFileSync, renameSync, existsSync } from 'node:fs';
+import { readdirSync, readFileSync, writeFileSync, renameSync, existsSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { Store } from './store.js';
@@ -51,21 +51,52 @@ export interface Job {
 }
 
 /**
- * Default model routing.
+ * Model routing — calibrated against E-001, not guessed.
  *
- * Cheap, mechanical, high-volume work goes to Haiku; work that needs judgement goes to
- * Sonnet; work where being wrong is expensive and the reasoning is genuinely hard goes to
- * Opus. Overriding is per-job, so a caller who knows better can say so.
+ * The first real cold-start (gdpr: 547 files / 30k LOC / 440MB of transcripts) ran all eight
+ * agents at frontier tier and cost 1,318,993 output tokens. That run is the evidence for
+ * every assignment below, and it overturned two of my own priors:
+ *
+ *   annotate — 213,668 tokens, the 2nd most expensive agent, and the ONLY one that is pure
+ *     volume: read a file, write one concrete sentence about it. Low fabrication risk,
+ *     no cross-referencing, no judgement. This is the safe Haiku win, and it is ~16% of the
+ *     entire bill.
+ *
+ *   extract-threads — I had this at Haiku. THE RUN PROVED ME WRONG. The agent surfaced 106
+ *     raw candidates and kept 18; all the value was in the killing, which required
+ *     cross-checking each idea against docs, the ledger, and git to ask "was this actually
+ *     shipped? was it already refused?". A cheaper model produces a longer list, and a
+ *     threads screen full of chaff is a screen the user stops opening. Promoted to Sonnet.
+ *
+ *   author-flows / red-team stay at Opus and are not negotiable. They produced every
+ *     critical finding — the eval-contamination proof, the document-blind eids, the dead
+ *     E9(c). Being wrong here is expensive in a way that dwarfs the token cost, and being
+ *     *plausibly* wrong is worse than being silent.
+ *
+ * The principle: cheapen VOLUME, never cheapen JUDGEMENT. A token saved on a job whose whole
+ * output is a judgement call is not a saving, it is a defect you paid less for.
  */
 const TIER: Record<JobType, Job['tier']> = {
-  'extract-threads': 'haiku',
+  // Pure volume. Read a thing, describe it. Measured at 213k tokens — the biggest single win.
+  annotate: 'haiku',
   'summarize-session': 'haiku',
+
+  // Judgement, cross-referencing, and a strong duty not to fabricate.
+  'extract-threads': 'sonnet',
   reconcile: 'sonnet',
-  annotate: 'sonnet',
   verify: 'sonnet',
   ask: 'sonnet',
+
+  // Being wrong here is expensive, and a confident wrong answer is worse than no answer.
   'author-flows': 'opus',
   'red-team': 'opus',
+};
+
+/** What each tier maps to when dispatching a Claude Code subagent. */
+export const MODEL_FOR_TIER: Record<Job['tier'], string> = {
+  haiku: 'haiku',
+  sonnet: 'sonnet',
+  opus: 'opus',
 };
 
 export class JobQueue {
@@ -142,9 +173,15 @@ export class JobQueue {
     const running = join(this.dir, `${id}.running`);
     const src = existsSync(running) ? running : this.path(id);
     if (!existsSync(src)) return;
+
     const job: Job = { ...JSON.parse(readFileSync(src, 'utf8')), ...patch };
     writeFileSync(this.path(id), JSON.stringify(job, null, 2));
-    if (src === running) renameSync(running, this.path(id));
+
+    // UNLINK the claim marker — do not rename it over the result we just wrote.
+    // A rename here silently clobbered the completed job with its own pre-completion copy,
+    // discarding status, result and token count. `spent()` then read 0 forever, which is the
+    // worst possible failure for a cost meter: not missing, but confidently wrong and free.
+    if (src === running) rmSync(running, { force: true });
   }
 
   /** Total output tokens spent across all finished jobs — the live cost meter. */
