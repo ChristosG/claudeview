@@ -169,9 +169,14 @@ export class GitWatcher {
     const events = this.store.all('event');
 
     // Which files has Claude touched via a file tool (Edit/Write/…)?
-    const ourFiles = new Set(
-      events.filter((e) => e.type === 'tool' && e.paths.length).flatMap((e) => e.paths),
-    );
+    //
+    // Same portability problem as the time windows: raw events do not survive a clone, so the
+    // Session rollups carry `filesTouched` and we union both. On this machine the events are
+    // richer; on a fresh checkout the rollups are all there is.
+    const ourFiles = new Set([
+      ...events.filter((e) => e.type === 'tool' && e.paths.length).flatMap((e) => e.paths),
+      ...this.store.all('session').flatMap((s) => s.stats?.filesTouched ?? []),
+    ]);
 
     // When were we actually AT the keyboard? One window per observed session.
     //
@@ -186,22 +191,41 @@ export class GitWatcher {
     // produced the bytes. Getting this wrong is expensive in the most literal sense: every
     // false "foreign" queues a model to go and explain a change that needs no explaining.
     const windows: Array<[number, number]> = [];
-    const bySession = new Map<string, { min: number; max: number }>();
-    for (const e of events) {
-      if (e.sessionId === 'git') continue;
-      const t = Date.parse(e.ts);
-      if (Number.isNaN(t)) continue;
-      const w = bySession.get(e.sessionId);
-      if (!w) bySession.set(e.sessionId, { min: t, max: t });
-      else {
-        w.min = Math.min(w.min, t);
-        w.max = Math.max(w.max, t);
-      }
-    }
-    // Grace period: a commit is usually made moments AFTER the work that produced it, often
-    // as the very last act of a session — sometimes just past the final recorded event.
+
+    // Grace period: a commit is usually made moments AFTER the work that produced it — often
+    // as the very last act of a session, sometimes just past the final recorded event.
     const GRACE = 10 * 60_000;
-    for (const w of bySession.values()) windows.push([w.min - GRACE, w.max + GRACE]);
+
+    // Prefer the durable Session rollups over the raw events.
+    //
+    // This is what makes the design portable. Raw events are derived from transcripts, which
+    // live in ~/.claude on ONE machine — so on a fresh clone there are no events at all, and a
+    // watcher that depended on them would declare every commit in the project's history
+    // "foreign" and queue a model to explain work it had already recorded. The rollups are
+    // committed, so the windows survive the clone.
+    const sessions = this.store.all('session');
+    if (sessions.length) {
+      for (const s of sessions) {
+        const a = Date.parse(s.startedAt);
+        const b = Date.parse(s.endedAt ?? s.startedAt);
+        if (!Number.isNaN(a) && !Number.isNaN(b)) windows.push([a - GRACE, b + GRACE]);
+      }
+    } else {
+      // No rollups yet (first sync ever): fall back to the raw stream.
+      const bySession = new Map<string, { min: number; max: number }>();
+      for (const e of events) {
+        if (e.sessionId === 'git') continue;
+        const t = Date.parse(e.ts);
+        if (Number.isNaN(t)) continue;
+        const w = bySession.get(e.sessionId);
+        if (!w) bySession.set(e.sessionId, { min: t, max: t });
+        else {
+          w.min = Math.min(w.min, t);
+          w.max = Math.max(w.max, t);
+        }
+      }
+      for (const w of bySession.values()) windows.push([w.min - GRACE, w.max + GRACE]);
+    }
 
     const witnessed = (ts: string) => {
       const t = Date.parse(ts);

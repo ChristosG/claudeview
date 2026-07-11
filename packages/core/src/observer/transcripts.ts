@@ -396,7 +396,61 @@ export class TranscriptTailer {
     // One batched write for the whole tail. Writing per-event would re-fold the log on
     // every append and turn a bulk ingest quadratic.
     res.events = this.store.putMany('event', [...pending.values()] as any);
+
+    this.rollUpSessions();
     this.saveOffsets(offsets);
     return res;
+  }
+
+  /**
+   * Distil the raw event stream into durable Session records.
+   *
+   * This is what lets the raw events stay OUT of git. Events are a pure function of the
+   * transcripts — but the transcripts live in ~/.claude on one machine, so a clone on another
+   * laptop would lose the entire history of who did what and when. The rollup is the portable
+   * residue: the time window (which the git watcher needs to decide whether a commit was
+   * witnessed), the churn, the files touched, and how much of the work was subagents.
+   *
+   * Cheap and idempotent — recomputed from the folded event log on every tail, so a session
+   * that grows simply produces a higher revision of the same record.
+   */
+  private rollUpSessions(): void {
+    const bySession = new Map<string, Event[]>();
+    for (const e of this.store.all('event')) {
+      if (e.sessionId === 'git' || e.sessionId === 'unknown') continue;
+      const list = bySession.get(e.sessionId) ?? [];
+      list.push(e);
+      bySession.set(e.sessionId, list);
+    }
+
+    const existing = new Map(this.store.all('session').map((s) => [s.sessionId, s]));
+    const rows: any[] = [];
+
+    for (const [sessionId, evs] of bySession) {
+      const times = evs.map((e) => e.ts).sort();
+      const files = [...new Set(evs.flatMap((e) => e.paths))];
+      const count = (t: string) => evs.filter((e) => e.tool === t).length;
+
+      const row = {
+        id: `session:${sessionId}`,
+        sessionId,
+        provenance: 'observed' as const,
+        startedAt: times[0]!,
+        endedAt: times[times.length - 1]!,
+        stats: {
+          prompts: evs.filter((e) => e.type === 'prompt').length,
+          edits: count('Edit'),
+          writes: count('Write'),
+          bash: count('Bash'),
+          filesTouched: files,
+        },
+        // Preserve an authored summary if the Interpreter has already written one — a rollup
+        // must never clobber the one field a model contributed.
+        ...(existing.get(sessionId)?.summary ? { summary: existing.get(sessionId)!.summary } : {}),
+      };
+      rows.push(row);
+    }
+
+    if (rows.length) this.store.putMany('session', rows);
   }
 }
