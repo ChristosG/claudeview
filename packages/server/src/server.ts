@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { readFileSync, existsSync, watch, readdirSync } from 'node:fs';
+import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import { join, extname, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import {
-  Store, JobQueue, sync, checkStaleness, needsAttention, transcriptDirs, type JobType,
+  Store, JobQueue, sync, checkStaleness, needsAttention, transcriptDirs,
+  fingerprint, changed, type Fingerprint, type JobType,
 } from '@claudeview/core';
 
 /**
@@ -22,9 +23,10 @@ import {
  *      done, it does the only honest thing available to it: it writes a job and waits for an
  *      agent to pick it up. The button says "queue", not "run", because that is the truth.
  *
- * Liveness comes from watching the transcript files directly. Claude Code is already writing
- * every tool call to disk as it works, so there is nothing to instrument and no hook to slow
- * your session down — we just watch the file that is being written anyway.
+ * Liveness comes from POLLING a cheap fingerprint of the code, the transcripts, and the store
+ * — not from fs.watch, which on Linux silently delivers nothing (see watchEverything). There
+ * is still no hook and no overhead on the session being observed: Claude Code writes every
+ * tool call to disk anyway, so we just notice.
  */
 
 const REPO = resolve(process.env.CLAUDE_PROJECT_DIR || process.cwd());
@@ -193,37 +195,52 @@ function broadcast(reason: string) {
 }
 
 /**
- * Watch what Claude Code is already writing.
+ * Notice when anything changes: the code, the transcripts, or the store.
  *
- * No hook, no instrumentation, no overhead on the user's session — the transcript is being
- * written anyway, so we simply notice. Coalesced, because a busy session produces a torrent
- * of writes and a re-render per byte would be absurd.
+ * This POLLS a cheap stat-only fingerprint rather than using `fs.watch`, and that is a
+ * deliberate, hard-won choice.
+ *
+ * `fs.watch(dir, { recursive: true })` on Linux registers successfully, throws nothing,
+ * warns nothing — and then delivers ZERO events. A try/catch fallback never fires, because
+ * nothing ever fails. The dashboard sat there looking perfectly healthy while being totally
+ * blind to code changes; it only *seemed* live because syncs were being triggered by hand.
+ *
+ * That is precisely the failure this whole project exists to catch: an API that reports
+ * success and quietly does nothing. Having built a tool to find exactly that class of bug, I
+ * then shipped one. So: do not trust the OS to tell us. Look.
+ *
+ * The probe is stat-only — nothing is opened, nothing is parsed — so it costs tens of
+ * milliseconds, and the expensive sync runs only when the fingerprint actually moves.
  */
 function watchEverything() {
-  let timer: NodeJS.Timeout | undefined;
-  const ping = (reason: string) => {
-    clearTimeout(timer);
-    timer = setTimeout(async () => {
-      try {
-        await sync(REPO, { queueWork: false });
-      } catch {
-        // A failed sync must not kill the watcher; the next write will retry.
-      }
-      broadcast(reason);
-    }, 400);
+  let last: Fingerprint | undefined;
+  let running = false;
+
+  const tick = async () => {
+    if (running) return; // a slow sync must not stack up behind itself
+    running = true;
+    try {
+      const now = fingerprint(REPO, join(homedir(), '.claude'));
+      const diff = changed(last, now);
+      const first = last === undefined;
+      last = now;
+
+      if (first || diff.length === 0) return;
+
+      await sync(REPO, { queueWork: false });
+      // Re-fingerprint AFTER the sync: it writes to the store, and we must not treat our own
+      // write as a change and loop forever.
+      last = fingerprint(REPO, join(homedir(), '.claude'));
+      broadcast(diff.join('+'));
+    } catch {
+      // A failed tick must never kill the poller. The next one retries.
+    } finally {
+      running = false;
+    }
   };
 
-  for (const dir of [...transcriptDirs(REPO, join(homedir(), '.claude')), join(REPO, '.claudeview')]) {
-    if (!existsSync(dir)) continue;
-    try {
-      watch(dir, { recursive: true }, () => ping(dir.includes('.claudeview') ? 'store' : 'transcript'));
-    } catch {
-      // recursive watch is unsupported on some platforms — degrade to top-level only
-      try {
-        watch(dir, () => ping('transcript'));
-      } catch { /* give up on this dir, keep the others */ }
-    }
-  }
+  void tick(); // establish the baseline immediately
+  setInterval(tick, 2000).unref();
 }
 
 // ───────────────────── static + http ─────────────────────

@@ -4,6 +4,7 @@ export * from './jobs.js';
 export * from './staleness.js';
 export * from './brief.js';
 export * from './sync.js';
+export * from './fingerprint.js';
 export * from './observer/transcripts.js';
 export * from './observer/git.js';
 export * from './observer/code.js';
