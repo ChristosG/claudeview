@@ -1,0 +1,8 @@
+{
+  "name": "claudeview",
+  "displayName": "ClaudeView",
+  "version": "0.1.0",
+  "description": "A project consciousness for Claude Code. Observes what actually happened (transcripts, git, AST), renders it as a live dashboard, and serves it back to Claude so no session ever starts amnesiac.",
+  "license": "MIT",
+  "keywords": ["memory", "architecture", "observability", "dashboard", "knowledge"]
+}

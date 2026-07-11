@@ -1,0 +1,8 @@
+packages:
+  - packages/*
+
+# Supply-chain hardening. This tool reads a developer's entire session history,
+# so a compromised transitive dep would be a worst-case blast radius.
+blockExoticSubdeps: true
+trustPolicy: no-downgrade
+minimumReleaseAge: 10080 # 7 days — never install a package published minutes ago

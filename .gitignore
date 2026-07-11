@@ -1,0 +1,10 @@
+node_modules/
+dist/
+*.tsbuildinfo
+.env
+.env.*
+!.env.example
+
+# ClaudeView's own derived index — a pure function of .claudeview/*.jsonl,
+# rebuilt in seconds. Never committed: a binary blob would only buy merge conflicts.
+.claudeview/cache/
