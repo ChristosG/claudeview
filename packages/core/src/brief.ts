@@ -31,6 +31,20 @@ export interface BriefOptions {
   maxChars?: number;
 }
 
+/**
+ * One line, one fact, hard-capped.
+ *
+ * The brief is an INDEX, not a payload. Every entry names a thing and gives the single
+ * clause that makes it matter; the full text is always one free `cv_ask` away. Without this
+ * cap the first four experiment judgements (900 chars each) consumed the entire budget and
+ * the sections that actually change behaviour — what is STALE, what is open — were truncated
+ * off the bottom. The least urgent content silently evicted the most urgent.
+ */
+function line(s: string, cap = 130): string {
+  const t = s.replace(/\s+/g, ' ').trim();
+  return t.length <= cap ? t : t.slice(0, cap - 1).replace(/[\s,;:—-]+\S*$/, '') + '…';
+}
+
 export function buildBrief(store: Store, opts: BriefOptions = {}): string {
   const max = opts.maxChars ?? 3000;
   const lines: string[] = [];
@@ -68,7 +82,7 @@ export function buildBrief(store: Store, opts: BriefOptions = {}): string {
         : c.freshness === 'contradicted' ? 'the code now CONTRADICTS it'
         : 'the code beneath it changed';
       const where = c.anchors.filter((a) => a.freshness !== 'fresh').map((a) => a.anchor.symbol ?? a.anchor.path).slice(0, 3);
-      lines.push(`- **${c.kind}** "${c.title}" — ${why}${where.length ? ` (${where.join(', ')})` : ''}`);
+      lines.push(`- **${c.kind}** "${line(c.title, 70)}" — ${why}${where.length ? ` (${where.join(', ')})` : ''}`);
     }
     lines.push('');
     lines.push('_Do not repeat these claims to the user as current. Re-verify against the code first._');
@@ -86,35 +100,40 @@ export function buildBrief(store: Store, opts: BriefOptions = {}): string {
     lines.push('');
   }
 
-  // ── 3. Dead ends. The highest-value lines in the whole brief. ──
-  // Knowing what FAILED is what stops us cheerfully re-running a losing experiment. This
-  // is knowledge that exists nowhere in the code and dies with the session that learned it.
-  const losses = experiments.filter((e) => e.verdict === 'loss').slice(0, 5);
-  if (losses.length) {
-    lines.push('### Already tried and it did NOT work — do not redo these');
-    for (const e of losses) lines.push(`- ${e.title}${e.judgement ? ` — ${e.judgement}` : ''}`);
+  // ── 3. Open critique, loudest first. These change what you should do TODAY. ──
+  const critical = insights.filter((i) => i.severity === 'critical');
+  const high = insights.filter((i) => i.severity === 'high');
+  if (critical.length || high.length) {
+    lines.push(`### ${critical.length} critical / ${high.length} high open insight(s)`);
+    for (const i of [...critical, ...high].slice(0, 5)) {
+      lines.push(`- [${i.severity}] ${line(i.title, 110)}`);
+    }
     lines.push('');
   }
 
-  // ── 4. Ideas we said we'd explore and never did. ──
+  // ── 4. Dead ends. The highest-value lines in the whole brief. ──
+  // Knowing what FAILED is what stops us cheerfully re-running a losing experiment. This is
+  // knowledge that exists nowhere in the code and dies with the session that learned it.
+  // Titles only: the full post-mortem is one `cv_ask` away and does not belong in a preamble.
+  const losses = experiments.filter((e) => e.verdict === 'loss');
+  if (losses.length) {
+    lines.push(`### ${losses.length} thing(s) already tried that did NOT work — do not redo these`);
+    for (const e of losses.slice(0, 8)) lines.push(`- ${line(e.title, 110)}`);
+    if (losses.length > 8) lines.push(`- …and ${losses.length - 8} more (\`cv_ask\` for any of them)`);
+    lines.push('');
+  }
+
+  // ── 5. Ideas we said we'd explore and never did. ──
   if (threads.length) {
     lines.push(`### ${threads.length} open thread(s) — raised, never explored`);
-    for (const t of threads.slice(0, 5)) lines.push(`- ${t.title}`);
+    for (const t of threads.slice(0, 6)) lines.push(`- ${line(t.title, 110)}`);
     lines.push('');
   }
 
-  // ── 5. Standing decisions, so we don't quietly contradict ourselves. ──
+  // ── 6. Standing decisions, so we don't quietly contradict ourselves. ──
   if (decisions.length) {
-    lines.push('### Decisions in force');
-    for (const d of decisions.slice(0, 6)) lines.push(`- **${d.title}**: ${d.choice}`);
-    lines.push('');
-  }
-
-  // ── 6. Open critique. ──
-  const critical = insights.filter((i) => i.severity === 'critical' || i.severity === 'high');
-  if (critical.length) {
-    lines.push(`### ${critical.length} open insight(s) at high/critical severity`);
-    for (const i of critical.slice(0, 4)) lines.push(`- [${i.severity}] ${i.title}`);
+    lines.push(`### ${decisions.length} decision(s) in force — \`cv_ask\` before contradicting one`);
+    for (const d of decisions.slice(0, 5)) lines.push(`- ${line(`**${d.title}**: ${d.choice}`, 120)}`);
     lines.push('');
   }
 
