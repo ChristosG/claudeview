@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+#
+# claudeview — start Claude Code in the current project with ClaudeView attached.
+#
+#   claudeview                              # this project, dashboard auto-starts
+#   claudeview --dangerously-skip-permissions
+#   claudeview --no-dashboard               # plugin only, no browser, no server
+#
+# Any extra flags are passed straight through to `claude`.
+#
+set -euo pipefail
+
+CV_ROOT="${CLAUDEVIEW_ROOT:-/mnt/nvme2TB/claude_view_mcp}"
+REPO="$(pwd)"
+
+if [[ ! -f "$CV_ROOT/.claude-plugin/plugin.json" ]]; then
+  echo "claudeview: no plugin at $CV_ROOT (set CLAUDEVIEW_ROOT)" >&2
+  exit 1
+fi
+
+# One dashboard per project, on a stable port.
+#
+# The port is derived from a hash of the repo path rather than allocated dynamically, so the
+# same project always lands on the same URL. That matters more than it sounds: a dashboard you
+# keep open in a pinned browser tab is one you actually glance at, and a tool whose address
+# moves every session is one you stop opening.
+PORT=$(( 7800 + $(printf '%s' "$REPO" | cksum | cut -d' ' -f1) % 180 ))
+
+WANT_DASH=1
+ARGS=()
+for a in "$@"; do
+  if [[ "$a" == "--no-dashboard" ]]; then WANT_DASH=0; else ARGS+=("$a"); fi
+done
+
+if [[ "$WANT_DASH" == "1" ]]; then
+  if curl -sf -m 1 "http://localhost:$PORT/api/pulse" >/dev/null 2>&1; then
+    echo "claudeview: dashboard already up → http://localhost:$PORT"
+  elif [[ -f "$CV_ROOT/packages/server/dist/server.js" ]]; then
+    # Detached, and its own failure must never block the session it is only observing.
+    CLAUDE_PROJECT_DIR="$REPO" CV_PORT="$PORT" \
+      nohup node "$CV_ROOT/packages/server/dist/server.js" \
+      >"${TMPDIR:-/tmp}/claudeview-$PORT.log" 2>&1 &
+    sleep 1
+    if curl -sf -m 2 "http://localhost:$PORT/api/pulse" >/dev/null 2>&1; then
+      echo "claudeview: dashboard → http://localhost:$PORT"
+    else
+      echo "claudeview: dashboard failed to start (see ${TMPDIR:-/tmp}/claudeview-$PORT.log) — continuing without it" >&2
+    fi
+  else
+    echo "claudeview: not built — run 'pnpm -r build' in $CV_ROOT" >&2
+  fi
+fi
+
+exec claude --plugin-dir "$CV_ROOT" ${ARGS[@]+"${ARGS[@]}"}
