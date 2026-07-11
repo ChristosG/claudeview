@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { Store, JobQueue, sync, buildBrief, checkStaleness, needsAttention, MODEL_FOR_TIER } from '@claudeview/core';
+import { Store, JobQueue, sync, buildBrief, checkStaleness, needsAttention, MODEL_FOR_TIER, protectStore, listSnapshots } from '@claudeview/core';
 
 /**
  * The `cv` CLI — ClaudeView's write surface for agents that are not the main session.
@@ -258,6 +258,26 @@ const commands: Record<string, () => Promise<void> | void> = {
     console.log(`resolved ${n} claim(s)`);
   },
 
+  /**
+   * The recovery path, made visible.
+   *
+   * A backup nobody knows how to restore is not a backup. On 2026-07-12 an agent wiped a real
+   * store; recovery was only possible because the raw payloads happened to still be lying in a
+   * scratch directory. That was luck, and luck is not a design.
+   */
+  snapshots() {
+    const snaps = listSnapshots(repo);
+    if (!snaps.length) {
+      console.log('No snapshots yet. They are written on every store mutation, to ~/.claude/claudeview-snapshots/');
+      return;
+    }
+    console.log(`${snaps.length} snapshot(s) of ${repo}, newest first:\n`);
+    for (const s of snaps) {
+      console.log(`  ${s.at}   ${(s.records / 1024).toFixed(0).padStart(6)} KB   ${s.dir}`);
+    }
+    console.log(`\nTo restore:  cp <dir>/*.jsonl ${repo}/.claudeview/`);
+  },
+
   jobs() {
     out(new JobQueue(store()).list(flag('status') as any));
   },
@@ -374,3 +394,11 @@ if (!run) {
   process.exit(1);
 }
 await run();
+
+// Protect the store after ANY command that could have written to it.
+//
+// Centralised here rather than sprinkled through each command, because the failure this
+// guards against was caused by exactly the kind of gap that "remember to call it" produces:
+// a store nobody had staged, deleted by an agent tidying its worktree.
+const MUTATES = new Set(['sync', 'flow', 'decide', 'thread', 'insight', 'experiment', 'annotate', 'resolve']);
+if (MUTATES.has(cmd ?? '')) protectStore(repo);
