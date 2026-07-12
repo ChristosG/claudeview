@@ -17,7 +17,18 @@ set -euo pipefail
 
 # Default to wherever this script actually lives, so the checkout can be moved to another
 # machine (or just another directory) without editing anything. CLAUDEVIEW_ROOT still wins.
-CV_ROOT="${CLAUDEVIEW_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+#
+# The symlink walk is load-bearing. If this was linked onto your PATH rather than having the
+# checkout's own bin/ added to it, BASH_SOURCE is the *link*, not its target — bash doesn't
+# resolve it. Walking up from there lands on the link's parent (~/.local for a
+# ~/.local/bin/claudeview link) and we'd refuse to start, pointing at a directory that has
+# nothing to do with the checkout.
+SELF="${BASH_SOURCE[0]}"
+while [[ -L "$SELF" ]]; do
+  LINK="$(readlink "$SELF")"
+  [[ "$LINK" == /* ]] && SELF="$LINK" || SELF="$(cd -P "$(dirname "$SELF")" && pwd)/$LINK"
+done
+CV_ROOT="${CLAUDEVIEW_ROOT:-$(cd -P "$(dirname "$SELF")/.." && pwd)}"
 REPO="$(pwd)"
 
 if [[ ! -f "$CV_ROOT/.claude-plugin/plugin.json" ]]; then

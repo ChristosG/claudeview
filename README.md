@@ -23,6 +23,13 @@ Put the launcher on your `PATH`:
 echo "export PATH=\"$PWD/bin:\$PATH\"" >> ~/.bashrc && source ~/.bashrc
 ```
 
+Or, if you already keep a `bin` directory on your `PATH`, symlink it there instead — the
+launcher resolves the link and finds the checkout on its own:
+
+```bash
+ln -s "$PWD/bin/claudeview" ~/.local/bin/claudeview
+```
+
 Then, from **any** project you work on:
 
 ```bash
