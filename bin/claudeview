@@ -2,8 +2,9 @@
 #
 # claudeview — Claude Code in the current project, with ClaudeView attached.
 #
-#   claudeview                  # plugin + dashboard + --dangerously-skip-permissions
+#   claudeview                  # plugin + dashboard + browser tab + --dangerously-skip-permissions
 #   claudeview --safe           # ...without skip-permissions, for when you want the prompts
+#   claudeview --no-browser     # dashboard, but don't open a tab
 #   claudeview --no-dashboard   # plugin only; no server, no browser
 #
 # Any other flags pass straight through to `claude`.
@@ -29,7 +30,12 @@ while [[ -L "$SELF" ]]; do
   [[ "$LINK" == /* ]] && SELF="$LINK" || SELF="$(cd -P "$(dirname "$SELF")" && pwd)/$LINK"
 done
 CV_ROOT="${CLAUDEVIEW_ROOT:-$(cd -P "$(dirname "$SELF")/.." && pwd)}"
-REPO="$(pwd)"
+
+# The PROJECT, not the directory you happen to be standing in. The port below is a hash of
+# this, so if it were just $(pwd) then `claudeview` from src/ and from docs/ would hash to
+# different ports and you'd get two dashboards watching one repo. Non-git dirs keep the old
+# behaviour, which is the best we can do without a project to anchor to.
+REPO="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 
 if [[ ! -f "$CV_ROOT/.claude-plugin/plugin.json" ]]; then
   echo "claudeview: no plugin at $CV_ROOT (set CLAUDEVIEW_ROOT)" >&2
@@ -43,11 +49,13 @@ fi
 PORT=$(( 7800 + $(printf '%s' "$REPO" | cksum | cut -d' ' -f1) % 180 ))
 
 WANT_DASH=1
+WANT_BROWSER=1
 SKIP_PERMS=1
 ARGS=()
 for a in "$@"; do
   case "$a" in
     --no-dashboard) WANT_DASH=0 ;;
+    --no-browser)   WANT_BROWSER=0 ;;
     --safe)         SKIP_PERMS=0 ;;
     *)              ARGS+=("$a") ;;
   esac
@@ -55,18 +63,48 @@ done
 
 [[ "$SKIP_PERMS" == "1" ]] && ARGS+=(--dangerously-skip-permissions)
 
+# Hand the URL to the desktop's default browser and forget about it.
+#
+# Two things are load-bearing. Detachment: we `exec claude` below, so this process is about to
+# be replaced — anything still attached to it dies or, worse, holds the terminal. And silence:
+# xdg-open is chatty on stderr about things you cannot act on. A browser that fails to open is
+# an annoyance; a launcher that hangs because of one is a bug.
+#
+# No DISPLAY means no desktop to open a tab on (ssh, tty, container) — printing the URL is
+# then the correct and only useful behaviour.
+open_browser() {
+  local url="$1" opener=""
+  if [[ "$WANT_BROWSER" != "1" ]]; then return 0; fi
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    opener="open"
+  elif [[ -z "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]]; then
+    return 0   # headless: the printed URL is the whole story
+  else
+    for c in "${BROWSER:-}" xdg-open gio-open sensible-browser x-www-browser; do
+      [[ -n "$c" ]] && command -v "$c" >/dev/null 2>&1 && { opener="$c"; break; }
+    done
+  fi
+  [[ -z "$opener" ]] && return 0
+  ( setsid "$opener" "$url" >/dev/null 2>&1 & ) 2>/dev/null || true
+}
+
 if [[ "$WANT_DASH" == "1" ]]; then
-  if curl -sf -m 1 "http://localhost:$PORT/api/pulse" >/dev/null 2>&1; then
-    echo "claudeview: dashboard already up → http://localhost:$PORT"
+  URL="http://localhost:$PORT"
+  if curl -sf -m 1 "$URL/api/pulse" >/dev/null 2>&1; then
+    echo "claudeview: dashboard already up → $URL"
+    open_browser "$URL"
   elif [[ -f "$CV_ROOT/packages/server/dist/server.js" ]]; then
     # Detached. Its failure must never block the session it only observes.
     CLAUDE_PROJECT_DIR="$REPO" CV_PORT="$PORT" \
       nohup node "$CV_ROOT/packages/server/dist/server.js" \
       >"${TMPDIR:-/tmp}/claudeview-$PORT.log" 2>&1 &
     sleep 1
-    if curl -sf -m 2 "http://localhost:$PORT/api/pulse" >/dev/null 2>&1; then
-      echo "claudeview: dashboard → http://localhost:$PORT"
+    if curl -sf -m 2 "$URL/api/pulse" >/dev/null 2>&1; then
+      echo "claudeview: dashboard → $URL"
+      open_browser "$URL"
     else
+      # Deliberately no browser here: a tab onto a port with nothing behind it is worse than
+      # no tab, because it looks like the dashboard is broken rather than absent.
       echo "claudeview: dashboard failed to start (see ${TMPDIR:-/tmp}/claudeview-$PORT.log) — continuing without it" >&2
     fi
   else

@@ -37,8 +37,11 @@ cd ~/your-project
 claudeview
 ```
 
-That starts the dashboard on a stable per-project port (it prints the URL — pin the tab) and
-opens Claude Code with the plugin attached. Inside Claude:
+That opens the dashboard in your browser and starts Claude Code with the plugin attached. The
+port is derived from the project root, so it's the same every time for a given repo — no
+matter which subdirectory you launch from — and different repos never collide. Pin the tab.
+
+Inside Claude:
 
 - **`/cv-init`** — cold-start: read the whole session history, index the code, build the map.
 - **`/cv`** — what's stale, what's open, what failed, what was never tried.
@@ -56,7 +59,11 @@ CLAUDE_PROJECT_DIR=/path/to/your/project CV_PORT=7777 node packages/server/dist/
 ```
 
 `claudeview --safe` runs without `--dangerously-skip-permissions`;
-`claudeview --no-dashboard` skips the server.
+`claudeview --no-browser` starts the dashboard without opening a tab;
+`claudeview --no-dashboard` skips the server entirely.
+
+The browser is whatever `xdg-open` (or `open` on macOS) considers your default; `$BROWSER`
+overrides it. Over SSH or on a tty, no tab is opened — the URL is printed instead.
 
 </details>
 
