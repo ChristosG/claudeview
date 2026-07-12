@@ -11,3 +11,10 @@ dist/
 
 # Playwright screenshots from local verification
 .playwright-mcp/
+
+# Session rollups are per-machine history, not shared knowledge. Flows/decisions/insights
+# ARE committed (that is the point); your own session log is not.
+.claudeview/sessions.jsonl
+
+# Queued/claimed analysis jobs are local runtime state, not knowledge.
+.claudeview/jobs/

@@ -54,7 +54,7 @@ export function TrustScreen({ revision }: { revision: number }) {
           "verified" if every step still matches — one drifted step makes the whole diagram
           untrustworthy. Saying "3 of 4 anchors fine" would be technically true and
           practically misleading: you cannot half-trust a diagram. */}
-      <div className="grid g4" style={{ marginBottom: 14 }}>
+      <div className="grid g4">
         <Tile n={report.fresh} label="claims verified" sub="every anchor still matches" color="ok" />
         <Tile n={report.stale} label="claims stale" sub="code changed underneath" color="warn" />
         <Tile n={report.broken} label="claims broken" sub="the code is gone" color="bad" />
@@ -76,7 +76,7 @@ export function TrustScreen({ revision }: { revision: number }) {
         </div>
       ) : (
         <>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
             <span className="dim" style={{ fontSize: 12 }}>
               {attention.length} claim{attention.length > 1 ? 's' : ''} no longer match the code.
             </span>
@@ -94,7 +94,7 @@ export function TrustScreen({ revision }: { revision: number }) {
           </div>
 
           {attention.map((c) => (
-            <div key={c.kind + c.id} className="card" style={{ marginBottom: 10, borderLeft: `2px solid var(--${cvar(c.freshness)})` }}>
+            <div key={c.kind + c.id} className="card" style={{ borderLeft: `2px solid var(--${cvar(c.freshness)})` }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
                 <span className="badge" data-k={c.freshness}>{c.freshness}</span>
                 <span className="faint" style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: '.1em' }}>{c.kind}</span>

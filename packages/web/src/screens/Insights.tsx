@@ -71,7 +71,7 @@ export function Insights({ revision }: { revision: number }) {
         </div>
       ) : (
         open.map((i) => (
-          <div key={i.id} className="card" style={{ marginBottom: 10, borderLeft: `2px solid var(--${sevVar(i.severity)})` }}>
+          <div key={i.id} className="card" style={{ borderLeft: `2px solid var(--${sevVar(i.severity)})` }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
               <span className="badge" data-k={i.severity}>{i.severity}</span>
               <b style={{ color: 'var(--ink-bright)', fontWeight: 500 }}>{i.title}</b>
@@ -95,7 +95,7 @@ export function Insights({ revision }: { revision: number }) {
       )}
 
       {closed.length > 0 && (
-        <div className="card" style={{ marginTop: 14 }}>
+        <div className="card">
           <h3>Resolved &amp; dismissed — {closed.length}</h3>
           <table>
             <tbody>

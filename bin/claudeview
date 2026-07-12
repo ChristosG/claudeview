@@ -15,7 +15,9 @@
 #
 set -euo pipefail
 
-CV_ROOT="${CLAUDEVIEW_ROOT:-/mnt/nvme2TB/claude_view_mcp}"
+# Default to wherever this script actually lives, so the checkout can be moved to another
+# machine (or just another directory) without editing anything. CLAUDEVIEW_ROOT still wins.
+CV_ROOT="${CLAUDEVIEW_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 REPO="$(pwd)"
 
 if [[ ! -f "$CV_ROOT/.claude-plugin/plugin.json" ]]; then

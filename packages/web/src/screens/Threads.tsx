@@ -45,7 +45,7 @@ export function Threads({ revision }: { revision: number }) {
         <p>Ideas raised and never pursued, decisions in force, and the running record of what happened.</p>
       </header>
 
-      <div className="card" style={{ marginBottom: 12 }}>
+      <div className="card">
         <h3>Open threads — raised, never explored</h3>
         {open.length === 0 ? (
           <div className="faint" style={{ padding: '10px 0' }}>
@@ -53,7 +53,7 @@ export function Threads({ revision }: { revision: number }) {
           </div>
         ) : (
           open.map((t) => (
-            <div key={t.id} style={{ padding: '8px 0', borderBottom: '1px solid var(--line)' }}>
+            <div key={t.id} className="row">
               <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
                 <b style={{ color: 'var(--ink-bright)', fontWeight: 500 }}>{t.title}</b>
                 <span className="badge" data-k={t.status === 'exploring' ? 'medium' : 'low'} style={{ marginLeft: 'auto' }}>{t.status}</span>
@@ -69,14 +69,14 @@ export function Threads({ revision }: { revision: number }) {
         )}
       </div>
 
-      <div className="grid g2" style={{ marginBottom: 12 }}>
+      <div className="grid g2">
         <div className="card">
           <h3>Decisions in force</h3>
           {active.length === 0 ? (
             <div className="faint" style={{ padding: '10px 0' }}>none recorded</div>
           ) : (
             active.map((d) => (
-              <div key={d.id} style={{ padding: '8px 0', borderBottom: '1px solid var(--line)' }}>
+              <div key={d.id} className="row">
                 <b style={{ color: 'var(--ink-bright)', fontWeight: 500 }}>{d.title}</b>
                 <div style={{ fontSize: 11, marginTop: 3 }}>
                   <span style={{ color: 'var(--acc)' }}>{d.choice}</span>
@@ -105,7 +105,7 @@ export function Threads({ revision }: { revision: number }) {
             <div className="faint" style={{ padding: '10px 0' }}>nothing yet</div>
           ) : (
             dead.map((t) => (
-              <div key={t.id} style={{ padding: '6px 0', borderBottom: '1px solid var(--line)' }}>
+              <div key={t.id} className="row">
                 <span className="dim">{t.title}</span>
                 <span className="badge" data-k={t.status === 'done' ? 'fresh' : 'low'} style={{ marginLeft: 8 }}>{t.status}</span>
                 {t.abandonReason && <div className="faint" style={{ fontSize: 10, marginTop: 2 }}>{t.abandonReason}</div>}

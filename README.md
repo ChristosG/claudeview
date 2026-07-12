@@ -4,6 +4,55 @@
 for you, and serves it back to Claude — so no session ever starts amnesiac and no document
 ever lies to you without saying so.
 
+![ClaudeView](pulse.png)
+
+## Install
+
+Requires **Node ≥ 20** and Claude Code.
+
+```bash
+git clone https://github.com/ChristosG/claudeview.git
+cd claudeview
+corepack enable                 # provides pnpm
+pnpm install && pnpm -r build
+```
+
+Put the launcher on your `PATH`:
+
+```bash
+echo "export PATH=\"$PWD/bin:\$PATH\"" >> ~/.bashrc && source ~/.bashrc
+```
+
+Then, from **any** project you work on:
+
+```bash
+cd ~/your-project
+claudeview
+```
+
+That starts the dashboard on a stable per-project port (it prints the URL — pin the tab) and
+opens Claude Code with the plugin attached. Inside Claude:
+
+- **`/cv-init`** — cold-start: read the whole session history, index the code, build the map.
+- **`/cv`** — what's stale, what's open, what failed, what was never tried.
+- **`/cv-drain`** — run the analysis jobs the dashboard queued.
+
+<details>
+<summary>Running it without the launcher</summary>
+
+```bash
+# plugin only
+claude --plugin-dir /path/to/claudeview
+
+# dashboard only
+CLAUDE_PROJECT_DIR=/path/to/your/project CV_PORT=7777 node packages/server/dist/server.js
+```
+
+`claudeview --safe` runs without `--dangerously-skip-permissions`;
+`claudeview --no-dashboard` skips the server.
+
+</details>
+
 ---
 
 ## The problem
@@ -77,6 +126,10 @@ That asymmetry is the whole product: a stale claim might still be right, but a *
 is guaranteed to be about code that hasn't moved.** ClaudeView never asserts more than it can
 prove. Claims that cite no code at all are shown as *unverifiable* — never as fine.
 
+This repo ships its own map: clone it, open the **Map** screen, and you're looking at
+ClaudeView's Observer pipeline diagrammed by ClaudeView, anchored to the files that implement
+it. Touch one of those files and the box turns amber.
+
 ## What you get
 
 - **Pulse** — what happened while you were gone.
@@ -101,7 +154,8 @@ rendered human-second.
 **The repo carries its own consciousness.** `.claudeview/` lives *in the repo* and is
 committed as append-only JSONL — greppable, diffable, hand-editable, and it merges cleanly
 when two machines both write. Clone the repo on another laptop and the knowledge comes with
-it. No daemon, no account, no sync service.
+it. No daemon, no account, no sync service. (Your own session log is the exception: it is
+per-machine history, not shared knowledge, so it stays gitignored.)
 
 **No API key. Anywhere.** Analysis runs as Claude Code subagents on the subscription you
 already pay for. The dashboard therefore *cannot* run a model — so it queues jobs, and the
@@ -111,21 +165,14 @@ plugin drains them. Every expensive thing is visible before it costs anything.
 plus an agent that greps it beats RAG at that size — with no GPU, no key, and no model. Which
 is exactly why this runs on anyone's laptop.
 
-## Install
+## Health check
 
 ```bash
-pnpm install && pnpm -r build
-
-# try it in any project, no install:
-claude --plugin-dir /path/to/claude_view_mcp
-
-# the dashboard:
-CLAUDE_PROJECT_DIR=/path/to/your/project node packages/server/dist/server.js
-# → http://localhost:7777
+node packages/cli/dist/cli.js doctor
 ```
 
-Then, in Claude: `/cv-init` to cold-start a project, `/cv` for the current state,
-`/cv-drain` to process queued analysis.
+Proves the store is readable, the transcripts are being found, the index is current, and the
+staleness engine actually detects a moved anchor — on your repo, on demand.
 
 ## Status
 

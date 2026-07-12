@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { ReactFlow, Background, Handle, Position, type Node, type Edge, BackgroundVariant } from '@xyflow/react';
+import { ReactFlow, Background, Controls, Handle, Position, type Node, type Edge, BackgroundVariant } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import { useLive, post, type Freshness } from '../lib/api';
 
@@ -68,7 +68,7 @@ export function Map({ revision }: { revision: number }) {
       )}
 
       {comps && comps.length > 0 && (
-        <div className="card" style={{ marginTop: 16 }}>
+        <div className="card">
           <h3>Structural index — {comps.length} modules</h3>
           <div className="scroll-x">
             <table>
@@ -96,10 +96,11 @@ export function Map({ revision }: { revision: number }) {
 }
 
 function FlowCanvas({ flow }: { flow: Flow }) {
+  const [expanded, setExpanded] = useState(false);
   const { nodes, edges } = useMemo(() => {
     const nodes: Node[] = flow.steps.map((s, i) => ({
       id: s.id,
-      position: { x: i * 268, y: 0 },
+      position: { x: i * 300, y: 0 },
       data: { step: s },
       type: 'cv',
       draggable: true,
@@ -118,15 +119,18 @@ function FlowCanvas({ flow }: { flow: Flow }) {
   const bad = flow.steps.filter((s) => s.freshness !== 'fresh');
 
   return (
-    <div className="card" style={{ marginBottom: 16, padding: 0, borderColor: flow.freshness !== 'fresh' ? 'var(--warn)' : undefined }}>
-      <div style={{ padding: 14, borderBottom: '1px solid var(--line)', display: 'flex', alignItems: 'center', gap: 10 }}>
+    <div className="card" style={{ padding: 0, borderColor: flow.freshness !== 'fresh' ? 'var(--warn)' : undefined }}>
+      <div style={{ padding: '14px 16px', borderBottom: '1px solid var(--line)', display: 'flex', alignItems: 'center', gap: 12 }}>
         <div>
           <div style={{ fontFamily: 'var(--display)', fontSize: 14, letterSpacing: '.08em', textTransform: 'uppercase', color: 'var(--ink-bright)' }}>
             {flow.name}
           </div>
-          <div className="dim" style={{ fontSize: 11, marginTop: 2 }}>{flow.summary}</div>
+          <div className="dim" style={{ fontSize: 11, marginTop: 3 }}>{flow.summary}</div>
         </div>
         <span className="badge" data-k={flow.freshness} style={{ marginLeft: 'auto' }}>{flow.freshness}</span>
+        <button className="act" onClick={() => setExpanded((v) => !v)} title="give this map the whole window">
+          {expanded ? 'collapse' : 'expand'}
+        </button>
       </div>
 
       {/* When a step is stale we say exactly WHICH one and why. "Something in this diagram is
@@ -138,17 +142,26 @@ function FlowCanvas({ flow }: { flow: Flow }) {
         </div>
       )}
 
-      <div style={{ height: 240 }}>
+      {/* Remounting on expand re-runs fitView against the new height — otherwise the graph
+          stays at its old zoom and the extra space is just empty background. */}
+      <div className="flowmap" data-expanded={expanded ? '1' : '0'}>
         <ReactFlow
+          key={expanded ? 'wide' : 'normal'}
           nodes={nodes}
           edges={edges}
           nodeTypes={{ cv: StepNode }}
           fitView
-          fitViewOptions={{ padding: 0.18 }}
+          /* A wide, short pipeline is width-bound: fitView shrinks it to squeeze every step in,
+             and a taller canvas alone can't undo that. maxZoom 1 stops a short flow from being
+             blown up absurdly; the controls let you go past it and read one step at 100%. */
+          fitViewOptions={{ padding: 0.2, maxZoom: 1 }}
+          minZoom={0.2}
+          maxZoom={2}
           proOptions={{ hideAttribution: true }}
           nodesConnectable={false}
         >
           <Background variant={BackgroundVariant.Dots} gap={18} size={1} color="#1c2530" />
+          <Controls showInteractive={false} />
         </ReactFlow>
       </div>
     </div>

@@ -43,10 +43,10 @@ export function Lab({ revision }: { revision: number }) {
 
       {/* Dead ends, first and loudest. This is the section that saves real money. */}
       {losses.length > 0 && (
-        <div className="card" style={{ marginBottom: 14, borderColor: 'var(--bad)' }}>
+        <div className="card" style={{ borderColor: 'var(--bad)' }}>
           <h3 style={{ color: 'var(--bad)' }}>Dead ends — do not re-run these</h3>
           {losses.map((e) => (
-            <div key={e.id} style={{ padding: '6px 0', borderBottom: '1px solid var(--line)' }}>
+            <div key={e.id} className="row">
               <b style={{ color: 'var(--ink-bright)', fontWeight: 500 }}>{e.title}</b>
               {e.judgement && <div className="dim" style={{ fontSize: 11, marginTop: 2 }}>{e.judgement}</div>}
             </div>
@@ -78,7 +78,7 @@ function ExperimentCard({ e }: { e: Experiment }) {
   const best = series.length ? Math.max(...series) : undefined;
 
   return (
-    <div className="card" style={{ marginBottom: 12 }}>
+    <div className="card">
       <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, marginBottom: 8 }}>
         <span style={{ fontFamily: 'var(--display)', fontSize: 13, letterSpacing: '.06em', color: 'var(--ink-bright)', textTransform: 'uppercase' }}>
           {e.title}

@@ -30,14 +30,14 @@ export function Pulse({ revision }: { revision: number }) {
         <p>Everything on this screen is observed directly from your session transcripts, git, and the AST. No model wrote any of it, so none of it can be wrong.</p>
       </header>
 
-      <div className="grid g4" style={{ marginBottom: 12 }}>
+      <div className="grid g4">
         <Stat n={c.components} label="components" sub="indexed from the AST" />
         <Stat n={c.sessions} label="sessions" sub={`${c.prompts} prompts`} />
         <Stat n={c.subagents} label="subagents" sub="incl. workflow runs" />
         <Stat n={c.events} label="events" sub="tool calls & commits" />
       </div>
 
-      <div className="grid g2" style={{ marginBottom: 12 }}>
+      <div className="grid g2">
         <div className="card">
           <h3>Activity — last 7 days</h3>
           {data.activity.length === 0 ? (
@@ -80,7 +80,7 @@ export function Pulse({ revision }: { revision: number }) {
       {/* Changes nobody can account for. The AST heals itself for free, but nothing here
           knows WHY these happened — and that is exactly what makes them dangerous. */}
       {data.foreign.length > 0 && (
-        <div className="card" style={{ borderColor: 'var(--warn)', marginBottom: 12 }}>
+        <div className="card" style={{ borderColor: 'var(--warn)' }}>
           <h3 style={{ color: 'var(--warn)' }}>Changed without us watching</h3>
           <p className="dim" style={{ fontSize: 11, marginBottom: 10 }}>
             These commits are not explained by any session we recorded — a teammate's push, a rebase, or an edit made
