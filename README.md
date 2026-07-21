@@ -40,12 +40,14 @@ cd /path/to/claudeview
 git pull && pnpm install && pnpm -r build
 ```
 
-That's the whole update. The next `claudeview` notices that a dashboard left running from
-before the update is executing the old code, and restarts it — a server outlives the session
-that started it, so otherwise your fixes would sit on disk, unrunning, with no symptom except
-the bug you just fixed still happening. `claudeview --restart` forces it by hand. Your projects are untouched: every project keeps its own knowledge
-in its own `.claudeview/` directory, and the code you just pulled only reads and writes
-there. Nothing is stored centrally, so there is nothing to migrate.
+That's the whole update. Your projects are untouched: every project keeps its own knowledge in
+its own `.claudeview/` directory, and the code you just pulled only reads and writes there.
+Nothing is stored centrally, so there is nothing to migrate.
+
+The next `claudeview` also notices if a dashboard left running from *before* the update is
+still executing the old code, and restarts it. A dashboard outlives the session that started
+it, so without this your fixes sit on disk unrunning — with no symptom except the bug you just
+fixed still happening. `claudeview --restart` forces a fresh one by hand.
 
 Worth running once per project after an update, on any project you have used for a while:
 
