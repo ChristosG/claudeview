@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync, writeFileSync, appendFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Store } from './store.js';
@@ -152,6 +152,103 @@ test('records survive chunk boundaries, in bytes and in characters', () => {
   const st = new Store(root, undefined, { chunkSize: 64 });
   assert.equal(st.all('session').length, 500);
   assert.equal(st.lastStats.skipped, 1);
+
+  rmSync(root, { recursive: true, force: true });
+});
+
+/**
+ * A long-lived Store re-reads when the file changes underneath it — and not otherwise.
+ *
+ * The dashboard server built a NEW Store for every HTTP request (`const store = () => new
+ * Store(REPO)`), so every API call re-parsed the entire log from disk. At 36 MB that is 0.39s
+ * and merely wasteful; at 513 MB it was minutes, and the dashboard was unreachable.
+ *
+ * The obvious fix — one Store, held forever — is wrong, and quietly so. This store is written
+ * by processes we are not: another Claude session's MCP writes, the plugin's hooks, a headless
+ * drain runner, `git pull`. A cached instance would serve confidently stale data, which for a
+ * tool whose entire purpose is telling you when something is out of date would be a
+ * particularly humiliating bug.
+ *
+ * So the cache validates itself against the file's size and mtime before every use. Cheap
+ * (one stat), and it trusts nothing: not a watcher, not a notification, not our own assumption
+ * that we are the only writer. The same reasoning as `watchEverything` polling a fingerprint
+ * rather than believing fs.watch — look, don't trust.
+ */
+test('a held Store sees other writers, without re-reading on every call', () => {
+  const root = repo();
+  const held = new Store(root);
+  const rec = (id: string, title: string) => ({
+    id, provenance: 'authored' as const, title, detail: 'd',
+    severity: 'low' as const, confidence: 0.5, status: 'open' as const,
+  });
+
+  held.put('insight', rec('i1', 'first') as any);
+  assert.equal(held.all('insight').length, 1);
+
+  // Reading repeatedly must not re-parse the log repeatedly. This is the whole point.
+  const afterFirstRead = held.reloads;
+  for (let i = 0; i < 50; i++) held.all('insight');
+  assert.equal(held.reloads, afterFirstRead, '50 reads, zero re-parses');
+
+  // Nor must our OWN writes force a re-parse — that would restore the O(n^2) bulk ingest the
+  // fold cache exists to prevent (measured: 59 MB of transcripts took 123 seconds).
+  for (let i = 0; i < 50; i++) held.put('insight', rec(`own${i}`, `t${i}`) as any);
+  assert.equal(held.reloads, afterFirstRead, '50 writes, still zero re-parses');
+  assert.equal(held.all('insight').length, 51);
+
+  // But a DIFFERENT process appending must be seen, on the very next read.
+  const other = new Store(root);
+  other.put('insight', rec('i2', 'from another session') as any);
+
+  assert.equal(held.all('insight').length, 52, 'another writer is visible immediately');
+  assert.equal(held.get('insight', 'i2')!.title, 'from another session');
+  assert.ok(held.reloads > afterFirstRead, 'and that required exactly one re-parse');
+
+  // Including a wholesale rewrite of the log under us — what compaction and `git pull` do.
+  const folded = other.foldedRaw('insight');
+  writeFileSync(join(root, '.claudeview', 'insights.jsonl'),
+    [...folded.values()].map((r) => JSON.stringify(r)).join('\n') + '\n');
+  assert.equal(held.all('insight').length, 52, 'a rewritten log is re-read, not assumed stale-free');
+
+  rmSync(root, { recursive: true, force: true });
+});
+
+/**
+ * An interleaved write by another process is never mistaken for our own.
+ *
+ * After appending, the store records the file's new size so its own write does not invalidate
+ * its own cache. The hazard: if someone else appended between our write and that stat, we
+ * would record THEIR bytes as ours and never re-read — silently losing their records until
+ * something else happened to invalidate. Rare, but it is a lost-write bug, and those do not
+ * announce themselves.
+ *
+ * So the size is checked, not assumed: we know exactly how many bytes we wrote, and if the
+ * file did not grow by precisely that much, someone else was here and the cache is dropped.
+ */
+test('a concurrent appender is not swallowed by our own write', () => {
+  const root = repo();
+  const held = new Store(root);
+  const rec = (id: string) => ({
+    id, provenance: 'authored' as const, title: id, detail: 'd',
+    severity: 'low' as const, confidence: 0.5, status: 'open' as const,
+  });
+
+  held.put('insight', rec('mine1') as any);
+  held.all('insight');
+
+  // Another process appends, and THEN we append — without us ever reading in between.
+  appendFileSync(
+    join(root, '.claudeview', 'insights.jsonl'),
+    JSON.stringify({
+      id: 'theirs', kind: 'insight', rev: 0, actor: 'other-machine',
+      ts: '2026-07-21T00:00:00.000Z', provenance: 'authored', title: 'theirs',
+      detail: 'd', severity: 'low', confidence: 0.5, evidence: [], status: 'open',
+    }) + '\n',
+  );
+  held.put('insight', rec('mine2') as any);
+
+  const ids = held.all('insight').map((r) => r.id).sort();
+  assert.deepEqual(ids, ['mine1', 'mine2', 'theirs'], 'nobody lost a record');
 
   rmSync(root, { recursive: true, force: true });
 });

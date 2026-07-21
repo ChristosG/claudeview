@@ -33,7 +33,24 @@ const REPO = resolve(process.env.CLAUDE_PROJECT_DIR || process.cwd());
 const PORT = Number(process.env.CV_PORT || 7777);
 const WEB = join(import.meta.dirname, '../../web/dist');
 
-const store = () => new Store(REPO);
+/**
+ * ONE Store, held for the life of the server.
+ *
+ * This was `() => new Store(REPO)` — a fresh instance per HTTP request, and therefore a full
+ * re-parse of every log on every single API call. It was not a silly choice: the store is
+ * written by processes this server is not (another session's MCP server, the plugin's hooks,
+ * the drain runner, `git pull`), and a naive cached instance would serve stale data, which for
+ * a dashboard whose whole job is telling you when something is out of date would be the worst
+ * possible failure. Rebuilding per request was the safe way to be correct.
+ *
+ * It is now safe to hold one instead, because the Store validates its fold against each file's
+ * size and mtime before every use — see `Store.folded`. Correctness is unchanged and does not
+ * depend on us being the only writer; we simply stop re-parsing megabytes to answer questions
+ * about a file that has not moved. It measured 0.39s per request at 36 MB, and minutes at the
+ * 513 MB a damaged store reached.
+ */
+const shared = new Store(REPO);
+const store = () => shared;
 
 // ─────────────────────────── API ───────────────────────────
 

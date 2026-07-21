@@ -27,7 +27,12 @@ const REPO = process.env.CLAUDE_PROJECT_DIR || process.cwd();
 
 const server = new McpServer({ name: 'claudeview', version: '0.1.0' });
 
-const store = () => new Store(REPO);
+// One Store for the life of the process, same as the dashboard server. The fold validates
+// itself against each file's size and mtime, so holding it stays correct even though other
+// sessions, the hooks and the drain runner all write this same store — and every tool call
+// stops re-parsing the whole log to answer a question about an unchanged file.
+const shared = new Store(REPO);
+const store = () => shared;
 const text = (s: string) => ({ content: [{ type: 'text' as const, text: s }] });
 const json = (o: unknown) => text(JSON.stringify(o, null, 2));
 

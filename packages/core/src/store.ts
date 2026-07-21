@@ -1,6 +1,6 @@
 import {
   appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync,
-  openSync, readSync, closeSync,
+  openSync, readSync, closeSync, statSync,
 } from 'node:fs';
 import { StringDecoder } from 'node:string_decoder';
 import { hostname } from 'node:os';
@@ -142,6 +142,21 @@ export class Store {
   private cache = new Map<Kind, Map<string, CVRecord>>();
 
   /**
+   * What the file looked like when we last read it — `size:mtimeMs`, or '' for absent.
+   *
+   * This is what makes a Store safe to HOLD. Without it a cached fold is only valid for a
+   * process that is the sole writer, which none of ours are: another session's MCP server, the
+   * plugin's hooks, the headless drain runner and `git pull` all write this same directory.
+   * The dashboard server dodged the problem by constructing a new Store per HTTP request,
+   * which is correct and costs a full re-parse of the log on every single API call — 0.39s at
+   * 36 MB, and minutes at 513 MB.
+   */
+  private seen = new Map<Kind, string>();
+
+  /** Full re-parses performed. Not diagnostics — the property the cache tests assert on. */
+  reloads = 0;
+
+  /**
    * `storeDir` defaults to `<repoRoot>/.claudeview` and should stay that way in real use —
    * the whole design rests on the knowledge living inside the repo and travelling with it.
    * The override exists so tools can analyse a repo read-only, without writing a single
@@ -227,16 +242,50 @@ export class Store {
     return out;
   }
 
-  /** Fold the log by id, keeping the winning revision of each. Cached after first build. */
+  /**
+   * A cheap signature of a kind's log on disk. Stat only — nothing is opened or parsed.
+   *
+   * Size alone is not enough: compaction and `git pull` both replace a log with a different
+   * one that could, in principle, be the same length. mtime alone is not enough either, at
+   * one-second filesystem granularity. Together they are as good as this needs to be, and the
+   * cost is a syscall measured in microseconds against a re-parse measured in seconds.
+   */
+  private signature(kind: Kind): string {
+    try {
+      const st = statSync(this.file(kind));
+      return `${st.size}:${st.mtimeMs}`;
+    } catch {
+      return ''; // absent, which is a state like any other and must be noticed when it changes
+    }
+  }
+
+  /**
+   * Fold the log by id, keeping the winning revision of each.
+   *
+   * Cached, but the cache VALIDATES ITSELF against the file before every use rather than
+   * trusting that we are the only writer. That check is the difference between a Store that
+   * can be held for the life of a server and one that must be rebuilt per request: hold a
+   * naive cache and the dashboard serves confidently stale data, which — for a tool whose
+   * entire purpose is telling you when something is out of date — would be the most
+   * embarrassing possible bug.
+   */
   private folded(kind: Kind): Map<string, CVRecord> {
-    let m = this.cache.get(kind);
-    if (m) return m;
-    m = new Map<string, CVRecord>();
+    const sig = this.signature(kind);
+    const m0 = this.cache.get(kind);
+    if (m0 && this.seen.get(kind) === sig) return m0;
+
+    let m = new Map<string, CVRecord>();
+    this.reloads++;
     for (const r of this.readRaw(kind)) {
       const prev = m.get(r.id);
       m.set(r.id, prev ? wins(prev, r) : r);
     }
     this.cache.set(kind, m);
+    // Re-stat AFTER reading, not before. If someone appended while we were parsing, the
+    // signature we just computed is already stale, and recording it would pin the cache to a
+    // file we never fully saw. Recording what the file is NOW costs one extra syscall and
+    // means the worst case is one redundant re-read rather than a silently missed record.
+    this.seen.set(kind, this.signature(kind));
     return m;
   }
 
@@ -274,8 +323,13 @@ export class Store {
 
   /** Drop the in-memory fold — e.g. after git rewrites the log under us on a pull. */
   invalidate(kind?: Kind): void {
-    if (kind) this.cache.delete(kind);
-    else this.cache.clear();
+    if (kind) {
+      this.cache.delete(kind);
+      this.seen.delete(kind);
+    } else {
+      this.cache.clear();
+      this.seen.clear();
+    }
   }
 
   /** Every revision of an id, oldest first. The audit trail — "when did this change?" */
@@ -341,7 +395,8 @@ export class Store {
     }
 
     if (lines.length === 0) return out; // every record was a no-op; touch nothing
-    appendFileSync(this.file(kind), lines.join('\n') + '\n');
+
+    this.appendAndTrack(kind, lines.join('\n') + '\n');
     return out;
   }
 
@@ -351,7 +406,38 @@ export class Store {
     if (!existing) return;
     const tomb = { ...existing, rev: existing.rev + 1, ts: new Date().toISOString(), actor: this.actor, deleted: true };
     this.folded(kind).set(id, tomb as CVRecord);
-    appendFileSync(this.file(kind), JSON.stringify(tomb) + '\n');
+    // Goes through the same append accounting as putMany. A tombstone that left the cache
+    // signature stale would be re-read as if it were someone else's write — harmless — but one
+    // that recorded another writer's bytes as ours would hide their records, which is not.
+    this.appendAndTrack(kind, JSON.stringify(tomb) + '\n');
+  }
+
+  /**
+   * Append bytes and keep the cache signature honest about who wrote them.
+   *
+   * Our own write must not invalidate our own fold — we just updated it in memory, and
+   * dropping it here would re-parse the entire log on every put, restoring the O(n²) ingest
+   * the cache exists to prevent. But we cannot blindly claim the new signature either: if
+   * another process appended between our read and our write, recording it would pin our cache
+   * over bytes we never saw and silently lose their records.
+   *
+   * So we verify rather than assume. We know exactly how many bytes we wrote; if the file did
+   * not grow by exactly that much, somebody else was here and the cache is dropped.
+   */
+  private appendAndTrack(kind: Kind, payload: string): void {
+    const file = this.file(kind);
+    let sizeBefore = 0;
+    try {
+      sizeBefore = statSync(file).size;
+    } catch {
+      sizeBefore = 0;
+    }
+    appendFileSync(file, payload);
+    if (statSync(file).size === sizeBefore + Buffer.byteLength(payload)) {
+      this.seen.set(kind, this.signature(kind));
+    } else {
+      this.seen.delete(kind);
+    }
   }
 }
 
