@@ -128,8 +128,33 @@ export async function healthcheck(repoRoot: string): Promise<Check[]> {
   const r = await sync(repoRoot, { queueWork: false });
   add('sync runs', r.components > 0, `${r.components} components, ${r.events} new events, ${r.ms.toFixed(0)}ms`);
 
-  add('code index is populated', r.components > 0,
-    r.components > 0 ? `${r.components} components` : 'ZERO components — the indexer is silently finding nothing', true);
+  // An empty index has three completely different causes and one useless message.
+  //
+  // "ZERO components — the indexer is silently finding nothing" was true and unactionable: it
+  // does not distinguish "you are standing in the wrong directory" from "this project is
+  // written in a language I have no grammar for" from "your install is broken". A user reading
+  // it goes hunting for a bug in the indexer, which is the one explanation it is NOT, because
+  // a broken grammar throws (see CodeIndexer.index) rather than returning empty.
+  //
+  // So say which one it is. The walker already knows.
+  if (r.components > 0) {
+    add('code index is populated', true, `${r.components} components from ${r.filesScanned} files`);
+  } else if (r.filesScanned === 0) {
+    const seen = r.skippedExtensions;
+    const detail = seen.length
+      ? `no indexable source files here. Found ${seen.map((s) => `${s.files}x ${s.ext}`).join(', ')}`
+        + ` — none of which ClaudeView has a grammar for. Is this the project ROOT, and is its`
+        + ` language supported? (Supported: .py .ts .tsx .js .go .rs .rb .java .c .cpp .cs .php`
+        + ` .swift .kt .scala .lua .sh)`
+      : `this directory contains no files ClaudeView can index — it looks empty. Run cv from the`
+        + ` project ROOT (the directory with your source in it), not from .claudeview/ or a`
+        + ` parent.`;
+    add('code index is populated', false, detail, true);
+  } else {
+    add('code index is populated', false,
+      `scanned ${r.filesScanned} indexable file(s) and extracted nothing — that is a real bug,`
+      + ` not a configuration problem. Please report it with the languages involved.`, true);
+  }
 
   // ── 2. THE CORE THESIS. Does a claim actually notice its code moving? ──
   //

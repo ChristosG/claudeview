@@ -24,7 +24,10 @@ export interface SyncResult {
   commits: number;
   foreignCommits: number;
   components: number;
+  filesScanned: number;
   filesReused: number;
+  /** Extensions present but unindexable — why an empty index is empty. See CodeIndexer.walk. */
+  skippedExtensions: { ext: string; files: number }[];
   stale: number;
   broken: number;
   queued: string[];
@@ -80,6 +83,8 @@ export async function sync(repoRoot: string, opts: SyncOptions = {}): Promise<Sy
     commits: git.commits.length,
     foreignCommits: git.foreign.length,
     components: store.all('component').length,
+    filesScanned: index.filesScanned,
+    skippedExtensions: index.skippedExtensions,
     filesReused: index.filesReused,
     stale: staleness.stale,
     broken: staleness.broken,

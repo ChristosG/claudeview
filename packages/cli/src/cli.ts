@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { readFileSync, existsSync } from 'node:fs';
+import { resolve, sep } from 'node:path';
 import { Store, JobQueue, sync, buildBrief, checkStaleness, needsAttention, MODEL_FOR_TIER, protectStore, listSnapshots, healthcheck, compactStore } from '@claudeview/core';
 
 /**
@@ -27,7 +27,52 @@ function flag(name: string): string | undefined {
   return i >= 0 ? argv[i + 1] : undefined;
 }
 
-const repo = resolve(flag('repo') ?? process.env.CLAUDE_PROJECT_DIR ?? process.cwd());
+/**
+ * Which repo are we operating on?
+ *
+ * `--repo <path>`, then a bare positional path, then CLAUDE_PROJECT_DIR, then the cwd.
+ *
+ * The positional form is accepted because it is what everybody types — `cv doctor ~/project`
+ * — and because the alternative was worse than unsupported: argv[1] was silently DISCARDED
+ * and the command ran against the current directory instead. You got a full health report,
+ * confidently, about a directory you had not asked about. Ignoring an argument you were given
+ * is the same sin as an API that reports success and does nothing, which is the entire thing
+ * this project exists to catch, so it is not something to be quietly tolerant about.
+ *
+ * Pointing at `.claudeview/` is corrected rather than rejected: it is a perfectly reasonable
+ * guess (it IS where the data lives) and the intent is unambiguous.
+ */
+/** Flags that consume the following token, so it is never mistaken for a positional path. */
+const VALUE_FLAGS = new Set(['--repo', '--json', '--grep', '--limit', '--status', '--queue']);
+
+function firstPositional(): string | undefined {
+  for (let i = 1; i < argv.length; i++) {
+    const a = argv[i]!;
+    if (VALUE_FLAGS.has(a)) { i++; continue; } // skip the flag AND its value
+    if (a.startsWith('--')) continue;          // a bare switch like --symbols or --force
+    return a;
+  }
+  return undefined;
+}
+
+function targetRepo(): string {
+  let picked = flag('repo') ?? firstPositional() ?? process.env.CLAUDE_PROJECT_DIR ?? process.cwd();
+  picked = resolve(picked);
+
+  // `cv doctor ~/project/.claudeview` — the store, not the project. Same for anything inside.
+  const marker = `${sep}.claudeview`;
+  const at = picked.endsWith(marker) ? picked.length - marker.length : picked.indexOf(`${marker}${sep}`);
+  if (at >= 0) {
+    const corrected = picked.slice(0, at) || sep;
+    console.error(`cv: ${picked} is the store, not the project — using ${corrected}`);
+    picked = corrected;
+  }
+
+  if (!existsSync(picked)) die(`no such directory: ${picked}`);
+  return picked;
+}
+
+const repo = targetRepo();
 
 /** Payload: inline JSON, or `@path/to/file.json` (strongly preferred — no quoting hazards). */
 function payload<T = any>(): T {

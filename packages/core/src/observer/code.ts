@@ -66,6 +66,11 @@ export interface IndexResult {
   filesFailed: number;
   /** Languages present in the repo whose grammar would not load. */
   grammarsFailed: string[];
+  /**
+   * Extensions found but not indexable, commonest first. The explanation for an empty index
+   * when the directory is not in fact empty — see `walk`.
+   */
+  skippedExtensions: { ext: string; files: number }[];
   ms: number;
 }
 
@@ -95,8 +100,19 @@ async function loadGrammar(lang: string): Promise<Language | null> {
   }
 }
 
-function walk(root: string): string[] {
-  const out: string[] = [];
+/**
+ * Find indexable files, and remember what we passed over.
+ *
+ * `skipped` is not bookkeeping — it is the answer to the only question a user asks when the
+ * index comes back empty: *why*. "0 components" is indistinguishable between "you pointed me
+ * at the wrong directory", "this project is written in a language I have no grammar for", and
+ * "your install is broken", and a health check that cannot tell those apart sends you
+ * debugging the wrong one. Counting extensions we declined costs nothing and turns the empty
+ * result into a sentence: 412 .vue files, no grammar for .vue.
+ */
+function walk(root: string): { files: string[]; skipped: Map<string, number> } {
+  const files: string[] = [];
+  const skipped = new Map<string, number>();
   const stack = [root];
   while (stack.length) {
     const d = stack.pop()!;
@@ -112,11 +128,14 @@ function walk(root: string): string[] {
       if (e.isDirectory()) {
         if (!SKIP_DIRS.has(e.name)) stack.push(p);
       } else if (LANGS[extname(e.name)]) {
-        out.push(p);
+        files.push(p);
+      } else {
+        const ext = extname(e.name).toLowerCase();
+        if (ext) skipped.set(ext, (skipped.get(ext) ?? 0) + 1);
       }
     }
   }
-  return out;
+  return { files, skipped };
 }
 
 /** The name a definition binds, wherever the grammar hangs it. */
@@ -180,7 +199,7 @@ export class CodeIndexer {
   async index(): Promise<IndexResult> {
     await this.init();
     const t0 = performance.now();
-    const files = walk(this.repoRoot);
+    const { files, skipped: skippedExts } = walk(this.repoRoot);
     const parser = new Parser();
     // `found` holds EVERYTHING that currently exists, including untouched files we reused —
     // deletion-reconciliation needs the complete picture or it would tombstone half the repo.
@@ -349,6 +368,9 @@ export class CodeIndexer {
       filesReused: reused,
       filesFailed: failed,
       grammarsFailed: [...grammarsFailed],
+      skippedExtensions: [...skippedExts.entries()]
+        .sort((a, b) => b[1] - a[1]).slice(0, 5)
+        .map(([ext, files]) => ({ ext, files })),
       ms: performance.now() - t0,
     };
   }
