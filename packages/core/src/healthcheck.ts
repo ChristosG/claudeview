@@ -79,6 +79,14 @@ function perturb(src: string, path: string, symbol?: string): string | null {
   return null; // cannot locate it — say so, never pretend it passed
 }
 
+/** Bytes in units a person reads at a glance, not 394394 KB. */
+function human(bytes: number): string {
+  if (bytes >= 1e9) return `${(bytes / 1e9).toFixed(1)} GB`;
+  if (bytes >= 1e6) return `${(bytes / 1e6).toFixed(1)} MB`;
+  if (bytes >= 1e3) return `${(bytes / 1e3).toFixed(0)} KB`;
+  return `${bytes} B`;
+}
+
 const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 export async function healthcheck(repoRoot: string): Promise<Check[]> {
@@ -118,9 +126,9 @@ export async function healthcheck(repoRoot: string): Promise<Check[]> {
     const total = bloat.reduce((n, b) => n + b.bytes, 0);
     add('store is compact', worst.ratio < 3,
       worst.ratio < 3
-        ? `${(total / 1e6).toFixed(1)} MB, worst kind '${worst.kind}' at ${worst.ratio.toFixed(1)}x revisions per record`
+        ? `${human(total)}, worst kind '${worst.kind}' at ${worst.ratio.toFixed(1)}x revisions per record`
         : `'${worst.kind}' holds ${worst.lines.toLocaleString()} lines for ${worst.records.toLocaleString()} records `
-          + `(${worst.ratio.toFixed(0)}x, ${(total / 1e6).toFixed(1)} MB total). Run: cv compact --repo ${repoRoot} `
+          + `(${worst.ratio.toFixed(0)}x, ${human(total)} total). Run: cv compact --repo ${repoRoot} `
           + `— free, local, and it keeps every authored decision.`);
   }
 
@@ -231,8 +239,21 @@ export async function healthcheck(repoRoot: string): Promise<Check[]> {
     .filter(existsSync);
   add('derived data stays out of git', leaked.length === 0,
     leaked.length ? `LEAKING: ${leaked.map((f) => f.split('/').pop()).join(', ')} are in the committed store` : 'events + components are in cache/');
+  // Report the size in units a human reads at a glance. "394394 KB durable" is a real number
+  // this printed, and it was read as a doubled 394 — a check nobody can parse is a check
+  // nobody acts on. And when it fails, name the file responsible and what to do, rather than
+  // leaving the reader to work out which of seven logs got fat.
+  const biggest = ['decisions', 'experiments', 'runs', 'insights', 'threads', 'flows', 'sessions']
+    .map((f) => ({ f, p: join(repoRoot, '.claudeview', `${f}.jsonl`) }))
+    .filter(({ p }) => existsSync(p))
+    .map(({ f, p }) => ({ f, size: statSync(p).size }))
+    .sort((a, b) => b.size - a.size)[0];
+
   add('committed store is lean', durable < 5_000_000,
-    `${(durable / 1024).toFixed(0)} KB durable`);
+    durable < 5_000_000
+      ? `${human(durable)} durable`
+      : `${human(durable)} durable — mostly ${biggest?.f}.jsonl (${human(biggest?.size ?? 0)}). `
+        + `This directory is committed to git, so it is in every clone. Run: cv compact --repo ${repoRoot}`);
 
   // ── 5. Would a fresh session actually learn anything? ──
   const brief = buildBrief(store);
