@@ -6,6 +6,7 @@
 #   claudeview --safe           # ...without skip-permissions, for when you want the prompts
 #   claudeview --no-browser     # dashboard, but don't open a tab
 #   claudeview --no-dashboard   # plugin only; no server, no browser
+#   claudeview --restart        # force a fresh dashboard, even if one is already healthy
 #
 # Any other flags pass straight through to `claude`.
 #
@@ -51,12 +52,14 @@ PORT=$(( 7800 + $(printf '%s' "$REPO" | cksum | cut -d' ' -f1) % 180 ))
 WANT_DASH=1
 WANT_BROWSER=1
 SKIP_PERMS=1
+WANT_RESTART=0
 ARGS=()
 for a in "$@"; do
   case "$a" in
     --no-dashboard) WANT_DASH=0 ;;
     --no-browser)   WANT_BROWSER=0 ;;
     --safe)         SKIP_PERMS=0 ;;
+    --restart)      WANT_RESTART=1 ;;
     *)              ARGS+=("$a") ;;
   esac
 done
@@ -107,9 +110,56 @@ probe() {
   esac
 }
 
+# Is the running dashboard executing the code that is on disk right now?
+#
+# It reports the size:mtime of the server file it LOADED; we compare against the file as it
+# is. Equal means current. Anything else — including a server too old to have the endpoint —
+# means restart, because a build we cannot identify is exactly the one we should not trust.
+SERVER_JS="$CV_ROOT/packages/server/dist/server.js"
+is_stale() {
+  [[ "$WANT_RESTART" == "1" ]] && return 0
+  local remote local_build
+  remote="$(curl -s -m 2 "$URL/api/version" 2>/dev/null | sed -n 's/.*"build":"\([^"]*\)".*/\1/p')"
+  [[ -z "$remote" ]] && return 0   # no version endpoint at all: predates this check, so old
+  local_build="$(stat -c '%s:%.0Y' "$SERVER_JS" 2>/dev/null || stat -f '%z:%m' "$SERVER_JS" 2>/dev/null)"
+  # stat(1) reports mtime in whole seconds; the server reports milliseconds. Compare on the
+  # second, or every start would look stale and restart a perfectly current dashboard.
+  [[ "${remote%:*}:$(( ${remote##*:} / 1000 ))" != "$local_build" ]]
+}
+
+# Stop the dashboard on this port, by the pid it tells us, having checked it is really ours.
+#
+# Killing by pid rather than by port because we must not shoot an unrelated process that
+# happens to be listening — and killing via an HTTP shutdown endpoint is worse: the server
+# binds every interface, so that would be a remote kill switch on the LAN.
+stop_dashboard() {
+  local pid
+  pid="$(curl -s -m 2 "$URL/api/version" 2>/dev/null | sed -n 's/.*"pid":\([0-9]*\).*/\1/p')"
+  if [[ -n "$pid" ]] && tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | grep -q 'packages/server/dist'; then
+    kill "$pid" 2>/dev/null || true
+    for _ in $(seq 1 20); do
+      kill -0 "$pid" 2>/dev/null || break
+      sleep 0.1
+    done
+  fi
+}
+
 if [[ "$WANT_DASH" == "1" ]]; then
   URL="http://localhost:$PORT"
   STATE="$(probe "$URL" 1)"
+
+  if [[ "$STATE" == "up" ]] && is_stale; then
+    # Running, healthy, and executing code you replaced.
+    #
+    # A dashboard survives the session that started it, so after `git pull && pnpm -r build`
+    # the OLD process is still serving. The launcher probed it, got a healthy 200, said
+    # "already up" and attached — so every fix sat on disk, unrunning, with no symptom except
+    # the bug you thought you had just fixed still happening. That is an expensive kind of
+    # silence, and it cost a debugging round.
+    echo "claudeview: dashboard at $URL is running an older build — restarting it"
+    stop_dashboard
+    STATE="down"
+  fi
 
   if [[ "$STATE" == "up" ]]; then
     # The one-dashboard-per-project case, and the common one: a second `claudeview` in the same

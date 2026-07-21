@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { readFileSync, existsSync, readdirSync } from 'node:fs';
+import { readFileSync, existsSync, readdirSync, statSync } from 'node:fs';
 import { join, extname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
 import {
   Store, JobQueue, sync, checkStaleness, needsAttention, transcriptDirs,
@@ -54,7 +55,35 @@ const store = () => shared;
 
 // ─────────────────────────── API ───────────────────────────
 
+/**
+ * What build is this process actually running?
+ *
+ * Captured at load, from our own file, and deliberately NOT re-stat'd per request: the point
+ * is to report the bytes this process is executing, not the bytes currently on disk. Those
+ * differ for exactly as long as a server keeps running across an update — which is the whole
+ * problem this exists to solve.
+ *
+ * Without it, a dashboard started before `git pull` serves forever: the launcher probes the
+ * port, gets a healthy 200, reports "already up", and attaches. Every fix you just pulled is
+ * on disk and none of it is running, and there is no symptom other than the bug you thought
+ * you had fixed still happening. The launcher compares this against the file and restarts.
+ */
+const BUILD = (() => {
+  try {
+    const st = statSync(fileURLToPath(import.meta.url));
+    return `${st.size}:${Math.round(st.mtimeMs)}`;
+  } catch {
+    return 'unknown';
+  }
+})();
+
 const routes: Record<string, (req: IncomingMessage, url: URL) => Promise<unknown>> = {
+  /**
+   * Identity, cheap. Deliberately touches no store: the launcher calls this on every start,
+   * and a liveness/version probe that parses megabytes would be its own kind of joke.
+   */
+  'GET /api/version': async () => ({ build: BUILD, pid: process.pid, repo: REPO }),
+
   /** Everything the Pulse screen needs, in one round trip. */
   'GET /api/pulse': async () => {
     const s = store();
