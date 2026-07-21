@@ -23,6 +23,7 @@ import { checkStaleness } from './staleness.js';
 import { CodeIndexer } from './observer/code.js';
 import { transcriptDirs } from './observer/transcripts.js';
 import { listSnapshots } from './protect.js';
+import { COMPACTABLE } from './compact.js';
 import { buildBrief } from './brief.js';
 
 export interface Check {
@@ -91,6 +92,37 @@ export async function healthcheck(repoRoot: string): Promise<Check[]> {
   const dirs = transcriptDirs(repoRoot);
   add('transcripts discovered', dirs.length > 0,
     dirs.length ? `${dirs.length} dir(s)` : 'none — no session history for this repo');
+
+  // ── 1b. Is the store carrying its own weight, or dead revisions? ──
+  //
+  // Write amplification is invisible until it is fatal. A poller that rewrote unchanged
+  // records turned 156 sessions into 630,571 revisions and 1.2 GB, and the first symptom the
+  // user ever saw was "dashboard failed to start" — a message about the wrong subsystem
+  // entirely, three days after the cause. The dirty check in `Store.putMany` prevents it now,
+  // but a store that predates the fix, or a future caller that finds a new way to churn,
+  // should be caught by something that looks rather than assumed.
+  //
+  // The measure is the RATIO, not the size. A big honest store is fine; a small store that is
+  // 90% superseded revisions is the bug, and it is the bug while it is still cheap to fix.
+  const bloat = [...COMPACTABLE].map((kind) => {
+    const f = store.fileFor(kind);
+    if (!existsSync(f)) return { kind, lines: 0, records: 0, bytes: 0 };
+    const records = store.foldedRaw(kind).size;
+    return { kind, lines: store.lastStats.parsed + store.lastStats.skipped, records, bytes: statSync(f).size };
+  }).filter((b) => b.lines > 0);
+
+  const worst = bloat.map((b) => ({ ...b, ratio: b.records ? b.lines / b.records : 1 }))
+    .sort((a, b) => b.ratio - a.ratio)[0];
+
+  if (worst) {
+    const total = bloat.reduce((n, b) => n + b.bytes, 0);
+    add('store is compact', worst.ratio < 3,
+      worst.ratio < 3
+        ? `${(total / 1e6).toFixed(1)} MB, worst kind '${worst.kind}' at ${worst.ratio.toFixed(1)}x revisions per record`
+        : `'${worst.kind}' holds ${worst.lines.toLocaleString()} lines for ${worst.records.toLocaleString()} records `
+          + `(${worst.ratio.toFixed(0)}x, ${(total / 1e6).toFixed(1)} MB total). Run: cv compact --repo ${repoRoot} `
+          + `— free, local, and it keeps every authored decision.`);
+  }
 
   const before = store.all('component').length;
   const r = await sync(repoRoot, { queueWork: false });

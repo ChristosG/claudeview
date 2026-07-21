@@ -1,4 +1,8 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import {
+  appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync,
+  openSync, readSync, closeSync,
+} from 'node:fs';
+import { StringDecoder } from 'node:string_decoder';
 import { hostname } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
@@ -30,6 +34,21 @@ import { FILES, Record as CVRecord, type Kind } from './schema.js';
  */
 const DERIVED = new Set<Kind>(['event', 'component']);
 
+/**
+ * Do these two revisions say the same thing?
+ *
+ * `rev` and `actor` are bookkeeping the store stamps itself and are excluded by definition.
+ * `ts` is the subtle one: it is DATA when the caller supplies it (an event's timestamp is the
+ * event) and bookkeeping when the store stamps it (a rollup recomputed at 12:00:02 describes
+ * the same session it described at 12:00:00). Comparing a stamped `ts` would make every
+ * record differ from itself and defeat the check entirely — which is the whole bug.
+ */
+function unchanged(a: CVRecord, b: CVRecord, tsIsData: boolean): boolean {
+  const strip = ({ rev, actor, ts, ...rest }: CVRecord) =>
+    tsIsData ? { ...rest, ts } : rest;
+  return canonical(strip(a)) === canonical(strip(b));
+}
+
 /** An update to record `id` appends a new revision; readers keep the winner. */
 function wins(a: CVRecord, b: CVRecord): CVRecord {
   if (a.rev !== b.rev) return a.rev > b.rev ? a : b;
@@ -43,6 +62,62 @@ function wins(a: CVRecord, b: CVRecord): CVRecord {
 export interface StoreStats {
   parsed: number;
   skipped: number;
+}
+
+/**
+ * Feed a file's lines to `fn` without ever holding the file as one string.
+ *
+ * `readFileSync(f, 'utf8')` is the obvious way to do this and it has a hard ceiling: V8
+ * refuses to build a string longer than 0x1fffffe8 (536,870,888) bytes and throws
+ * RangeError. A store that crosses that line does not get slow, it becomes unreadable — and
+ * since every read path goes through here, the whole dashboard 500s at once, which reads
+ * from the outside like a server that failed to start. A real store hit 537,008,888 bytes.
+ *
+ * Two details are load-bearing and both are silent when wrong:
+ *
+ *   StringDecoder, not buf.toString(). A read boundary lands mid-character eventually, and
+ *   toString() on a partial UTF-8 sequence yields U+FFFD instead of failing — corrupting a
+ *   path or a summary while reporting success. The decoder holds the incomplete bytes back
+ *   until the next chunk completes them.
+ *
+ *   The carry. A read boundary lands mid-LINE far more often, and a reader that treats each
+ *   chunk independently truncates one record and invents another, both of which then fail to
+ *   parse and get counted as "skipped" — a corruption that looks like tolerated garbage.
+ */
+function eachLine(file: string, chunkSize: number, fn: (line: string) => void): void {
+  const fd = openSync(file, 'r');
+  try {
+    const buf = Buffer.allocUnsafe(chunkSize);
+    const dec = new StringDecoder('utf8');
+    let carry = '';
+    let n: number;
+    while ((n = readSync(fd, buf, 0, chunkSize, null)) > 0) {
+      const parts = (carry + dec.write(buf.subarray(0, n))).split('\n');
+      carry = parts.pop()!; // last element is a partial line, or '' if the chunk ended cleanly
+      for (const p of parts) fn(p);
+    }
+    carry += dec.end();
+    if (carry) fn(carry); // a final line with no trailing newline is still a line
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/**
+ * Order-independent equality of two records' payloads.
+ *
+ * Key order in the serialised form is an artifact of how the object was built, not of what it
+ * means: a caller that spreads `{...existing, endedAt}` produces different key order than one
+ * that builds the row literally, and comparing raw JSON.stringify output would call those two
+ * different and append a duplicate. Sorting makes the comparison about content only.
+ */
+function canonical(v: unknown): string {
+  if (v === null || typeof v !== 'object') return JSON.stringify(v) ?? 'null';
+  if (Array.isArray(v)) return `[${v.map(canonical).join(',')}]`;
+  return `{${Object.keys(v as object).sort()
+    .filter((k) => (v as Record<string, unknown>)[k] !== undefined)
+    .map((k) => `${JSON.stringify(k)}:${canonical((v as Record<string, unknown>)[k])}`)
+    .join(',')}}`;
 }
 
 /** What a caller supplies: the payload, minus the bookkeeping the store stamps itself. */
@@ -72,7 +147,11 @@ export class Store {
    * The override exists so tools can analyse a repo read-only, without writing a single
    * byte into someone's working tree.
    */
-  constructor(repoRoot: string, storeDir?: string) {
+  /** Bytes per read in `eachLine`. Overridable only so tests can force chunk boundaries. */
+  private readonly chunkSize: number;
+
+  constructor(repoRoot: string, storeDir?: string, opts?: { chunkSize?: number }) {
+    this.chunkSize = opts?.chunkSize ?? 1 << 22; // 4 MiB
     this.dir = storeDir ?? join(repoRoot, '.claudeview');
     mkdirSync(join(this.dir, 'cache'), { recursive: true });
     mkdirSync(join(this.dir, 'panels'), { recursive: true });
@@ -133,9 +212,9 @@ export class Store {
     }
     const out: CVRecord[] = [];
     let skipped = 0;
-    for (const line of readFileSync(f, 'utf8').split('\n')) {
+    eachLine(f, this.chunkSize, (line) => {
       const t = line.trim();
-      if (!t || t.startsWith('#')) continue;
+      if (!t || t.startsWith('#')) return;
       try {
         const parsed = CVRecord.safeParse(JSON.parse(t));
         if (parsed.success) out.push(parsed.data);
@@ -143,7 +222,7 @@ export class Store {
       } catch {
         skipped++;
       }
-    }
+    });
     this.lastStats = { parsed: out.length, skipped };
     return out;
   }
@@ -169,6 +248,28 @@ export class Store {
   get<K extends Kind>(kind: K, id: string): Extract<CVRecord, { kind: K }> | undefined {
     const r = this.folded(kind).get(id);
     return r && !r.deleted ? (r as Extract<CVRecord, { kind: K }>) : undefined;
+  }
+
+  /** Where a kind's log lives on disk. For tools that operate on the file itself. */
+  fileFor(kind: Kind): string {
+    return this.file(kind);
+  }
+
+  /**
+   * Fold straight from disk, tombstones INCLUDED, bypassing the cache.
+   *
+   * `all()` is the wrong primitive for anything that rewrites the log: it hides deleted
+   * records, so a compactor built on it would drop every tombstone and silently resurrect
+   * everything the user had removed. Reads fresh, so `lastStats` afterwards describes the
+   * file as it is right now.
+   */
+  foldedRaw(kind: Kind): Map<string, CVRecord> {
+    const m = new Map<string, CVRecord>();
+    for (const r of this.readRaw(kind)) {
+      const prev = m.get(r.id);
+      m.set(r.id, prev ? wins(prev, r) : r);
+    }
+    return m;
   }
 
   /** Drop the in-memory fold — e.g. after git rewrites the log under us on a pull. */
@@ -207,19 +308,39 @@ export class Store {
 
     for (const rec of recs) {
       const existing = folded.get(rec.id as string);
-      const full = {
+
+      // Validate at the CURRENT revision first, so the candidate can be compared against what
+      // is already stored without a revision bump prejudging the answer. Zod runs here rather
+      // than after the comparison because it applies defaults, and a caller that omits a
+      // defaulted field must compare equal to a stored record that has it filled in.
+      const candidate = CVRecord.parse({
         ...rec,
         kind,
-        rev: existing ? existing.rev + 1 : 0,
+        rev: existing ? existing.rev : 0,
         ts: rec.ts ?? new Date().toISOString(),
         actor: this.actor,
-      };
-      const validated = CVRecord.parse(full) as Extract<CVRecord, { kind: K }>;
+      }) as Extract<CVRecord, { kind: K }>;
+
+      // Writing back an unchanged record must cost nothing.
+      //
+      // Callers recompute and re-put freely — rollUpSessions rebuilds every session's rollup
+      // on every observer tick, and the poller ticks every 2s — which is a good ergonomic and
+      // was a catastrophic one: 156 sessions became 630,571 revisions and the log passed the
+      // 512 MiB string ceiling, at which point NOTHING in the store could be read. Growth
+      // must track activity, not uptime, and the guarantee belongs here rather than in each
+      // caller, because the next caller to recompute-and-write will not remember this either.
+      if (existing && !existing.deleted && unchanged(existing, candidate, rec.ts !== undefined)) {
+        out.push(existing as Extract<CVRecord, { kind: K }>);
+        continue;
+      }
+
+      const validated = existing ? { ...candidate, rev: existing.rev + 1 } : candidate;
       folded.set(validated.id, validated);
       lines.push(JSON.stringify(validated));
       out.push(validated);
     }
 
+    if (lines.length === 0) return out; // every record was a no-op; touch nothing
     appendFileSync(this.file(kind), lines.join('\n') + '\n');
     return out;
   }

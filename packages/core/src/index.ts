@@ -6,6 +6,7 @@ export * from './brief.js';
 export * from './sync.js';
 export * from './fingerprint.js';
 export * from './protect.js';
+export * from './compact.js';
 export * from './healthcheck.js';
 export * from './observer/transcripts.js';
 export * from './observer/git.js';

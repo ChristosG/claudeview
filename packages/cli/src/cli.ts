@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { Store, JobQueue, sync, buildBrief, checkStaleness, needsAttention, MODEL_FOR_TIER, protectStore, listSnapshots, healthcheck } from '@claudeview/core';
+import { Store, JobQueue, sync, buildBrief, checkStaleness, needsAttention, MODEL_FOR_TIER, protectStore, listSnapshots, healthcheck, compactStore } from '@claudeview/core';
 
 /**
  * The `cv` CLI — ClaudeView's write surface for agents that are not the main session.
@@ -297,6 +297,33 @@ const commands: Record<string, () => Promise<void> | void> = {
           : `\nAll ${checks.length} checks pass.`,
     );
     if (criticals.length) process.exitCode = 1;
+  },
+
+  /**
+   * Repair a store bloated by pre-dirty-check write amplification. Free — pure file I/O.
+   *
+   * Prints rather than emitting JSON, because unlike every other command here this one is run
+   * by a human deciding whether to trust a destructive operation. It reports what it kept, not
+   * just what it saved: "156 records" next to "630,571 lines" is the number that shows nothing
+   * was thrown away, and it is the only reassurance that matters before rewriting a store.
+   */
+  compact() {
+    const res = compactStore(repo);
+    const mb = (n: number) => `${(n / 1e6).toFixed(1)} MB`;
+
+    if (res.kinds.length === 0) {
+      console.log(`ClaudeView store is already compact — ${repo}\n  nothing to do.`);
+      return;
+    }
+
+    console.log(`ClaudeView compaction — ${repo}\n`);
+    for (const k of res.kinds) {
+      console.log(`  ${k.kind.padEnd(10)} ${k.before.toLocaleString()} lines → ${k.after.toLocaleString()} records`);
+      console.log(`  ${''.padEnd(10)} ${mb(k.bytesBefore)} → ${mb(k.bytesAfter)}`);
+    }
+    console.log(`\n  reclaimed ${mb(res.bytesSaved)} in ${res.ms}ms, zero tokens.`);
+    console.log(`  originals kept at ${res.backupDir}`);
+    console.log(`\n  Authored history (decisions, insights, experiments, threads) was not touched.`);
   },
 
   jobs() {
