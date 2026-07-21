@@ -15,7 +15,7 @@
  * uncomfortable questions directly, and it is meant to be run against a live repo.
  */
 import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync, writeFileSync, statSync, readdirSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { Store } from './store.js';
 import { sync } from './sync.js';
@@ -24,6 +24,7 @@ import { CodeIndexer } from './observer/code.js';
 import { transcriptDirs } from './observer/transcripts.js';
 import { listSnapshots } from './protect.js';
 import { COMPACTABLE } from './compact.js';
+import { fingerprint } from './fingerprint.js';
 import { buildBrief } from './brief.js';
 
 export interface Check {
@@ -106,27 +107,34 @@ export async function healthcheck(repoRoot: string): Promise<Check[]> {
   // correctly and the tool reports no fault anywhere.
   //
   // Measured, not assumed: some /mnt paths are perfectly quick, and WSL2 keeps changing.
-  const probeStart = Date.now();
-  let statted = 0;
-  for (const f of (() => { try { return readdirSync(repoRoot); } catch { return []; } })().slice(0, 200)) {
-    try { statSync(join(repoRoot, f)); statted++; } catch { /* vanished; not our business */ }
-  }
-  const perStat = statted ? (Date.now() - probeStart) / statted : 0;
+  //
+  // And time the REAL operation, not a proxy for it. The first version stat'd up to 200 entries of the repo root — shallow, non-recursive, and
+  // almost certainly warm in cache. It passed on a filesystem slow enough to make the
+  // dashboard unusable, which makes it worse than no check: it answers "fine" to a question
+  // it never asked. `fingerprint` is precisely what the watcher runs on every tick, so time
+  // that, twice, and take the second (the first pays for cold cache, which the poller does
+  // not, and reporting the cold number would cry wolf on a perfectly good disk).
+  fingerprint(repoRoot);
+  const scanStart = Date.now();
+  fingerprint(repoRoot);
+  const scanMs = Date.now() - scanStart;
+
   const wsl = existsSync('/proc/version')
     && /microsoft/i.test(readFileSync('/proc/version', 'utf8'));
-
-  add('filesystem is fast enough to watch', perStat < 1,
-    perStat < 1
-      ? `~${perStat.toFixed(2)}ms per stat`
-      : `~${perStat.toFixed(1)}ms per stat — ${statted} files took ${Date.now() - probeStart}ms.`
+  // The watcher spends at most ~1/10th of its time looking, with a 2s floor, so anything past
+  // ~200ms already pushes it off the floor. 500ms is where a human starts feeling it.
+  add('filesystem is fast enough to watch', scanMs < 500,
+    scanMs < 500
+      ? `a full scan of this repo takes ${scanMs}ms`
+      : `a full scan of this repo takes ${scanMs}ms, and the watcher runs one every tick.`
         + (wsl && /^\/mnt\/[a-z]\//.test(repoRoot)
           ? ` This repo lives on a Windows drive mounted into WSL, which goes over 9p: every`
             + ` file operation is a round trip. Move the project into the WSL filesystem`
             + ` (e.g. ~/code/) and it will be 10-100x faster — for git, your editor, your`
-            + ` build, and ClaudeView alike. ClaudeView will back off its polling to stay out`
-            + ` of the way, but it cannot make the disk faster.`
-          : ` Watching a tree this slow costs more than it is worth; ClaudeView polls less`
-            + ` often to compensate.`));
+            + ` build, and ClaudeView alike. ClaudeView backs off its polling to stay out of`
+            + ` the way, but it cannot make the disk faster.`
+          : ` ClaudeView polls proportionally less often to compensate, so the dashboard stays`
+            + ` responsive, but it will notice changes later.`));
 
   // ── 1. Is the observed tier actually observing? ──
   const dirs = transcriptDirs(repoRoot);
