@@ -91,22 +91,39 @@ open_browser() {
   ( setsid "$opener" "$url" >/dev/null 2>&1 & ) 2>/dev/null || true
 }
 
+# Is anything holding this port at all?
+#
+# This is a TCP connect, not an HTTP request, and that distinction is the whole point. `down`
+# and `slow` are identical over HTTP — both are "no reply within the timeout" — but at the
+# socket layer they could not be more different: refused means nothing is there, accepted
+# means something is, however long it then takes to answer.
+#
+# Getting this wrong cost two rounds. A busy dashboard timed out the probe, was declared
+# `down`, skipped the staleness check entirely, and got a rival spawned on top of it, which
+# died with EADDRINUSE and was reported as losing a startup race that never took place. The
+# one state that made every symptom make sense was the one state the probe could not express.
+port_busy() {
+  (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null || return 1
+  exec 3<&- 3>&-
+  return 0
+}
+
 # Ask the dashboard how it is, and DISTINGUISH THE ANSWERS.
 #
-# The previous version probed with `curl -sf` and treated every non-success as "not running".
-# That single conflation cost hours: a dashboard whose store had grown past the 512 MiB string
+# An older version probed with `curl -sf` and treated every non-success as "not running". That
+# single conflation cost hours: a dashboard whose store had grown past the 512 MiB string
 # ceiling answered every request with HTTP 500, `curl -sf` returned failure, and the launcher
 # reported "failed to start" — about a server that was running perfectly and had been for days.
 # Restarting could not fix it, so the port got blamed, and the port was never involved.
 #
-# Echoes one of: up | broken <code> | down
+# Echoes one of: up | broken <code> | busy | down
 probe() {
   local code
   code="$(curl -s -o /dev/null -m "${2:-2}" -w '%{http_code}' "$1/api/pulse" 2>/dev/null)" || true
   case "$code" in
     200)      echo "up" ;;
-    ""|000)   echo "down" ;;          # nothing listening, or no answer within the timeout
-    *)        echo "broken $code" ;;  # listening, and telling us it is unwell
+    ""|000)   port_busy && echo "busy" || echo "down" ;;  # listening but slow, vs. absent
+    *)        echo "broken $code" ;;                      # listening, and telling us it is unwell
   esac
 }
 
@@ -197,6 +214,21 @@ if [[ "$WANT_DASH" == "1" ]]; then
   URL="http://localhost:$PORT"
   STATE="$(probe "$URL" 1)"
 
+  # `busy` means something IS listening — it just did not answer in time. Treat it as present
+  # for every decision below, because the one thing we must never do is spawn a second server
+  # onto an occupied port. It is also, by definition, a dashboard that is too slow to use, so
+  # it is a restart candidate whether or not we can identify its build.
+  if [[ "$STATE" == "busy" ]]; then
+    echo "claudeview: dashboard on $PORT is listening but slow to respond — replacing it" >&2
+    if stop_dashboard; then
+      STATE="down"
+    else
+      echo "claudeview: could not identify the process on $PORT — leaving it alone" >&2
+      echo "            stop it yourself:  pkill -f 'packages/server/dist/server.js'" >&2
+      STATE="occupied"
+    fi
+  fi
+
   if [[ "$STATE" == "up" ]] && is_stale; then
     # Running, healthy, and executing code you replaced.
     #
@@ -229,6 +261,8 @@ if [[ "$WANT_DASH" == "1" ]]; then
     echo "claudeview: its own error: $(curl -s -m 2 "$URL/api/pulse" | head -c 200)" >&2
     echo "claudeview: if that mentions a string length, the store needs compacting:" >&2
     echo "            cv compact --repo $REPO      # free, local, keeps your history" >&2
+  elif [[ "$STATE" == "occupied" ]]; then
+    : # something we cannot identify holds the port; already reported, do not spawn a rival
   elif [[ -f "$CV_ROOT/packages/server/dist/server.js" ]]; then
     # Detached. Its failure must never block the session it only observes.
     CLAUDE_PROJECT_DIR="$REPO" CV_PORT="$PORT" \
