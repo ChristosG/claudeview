@@ -127,21 +127,70 @@ is_stale() {
   [[ "${remote%:*}:$(( ${remote##*:} / 1000 ))" != "$local_build" ]]
 }
 
-# Stop the dashboard on this port, by the pid it tells us, having checked it is really ours.
+# Is this pid one of our dashboards, serving THIS port?
+#
+# cmdline alone is not enough: you may well have dashboards up for three different projects,
+# and killing the wrong one would close somebody else's tab. CV_PORT is how the launcher told
+# it which port to serve, so the environment is the authoritative answer.
+is_our_dashboard() {
+  local pid="$1"
+  tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | grep -q 'packages/server/dist' || return 1
+  tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null | grep -qx "CV_PORT=$PORT"
+}
+
+# Find the dashboard on this port. Asking it is the fast path, NOT the only one.
+#
+# The first version asked `/api/version` for the pid, which fails on precisely the servers
+# this exists to replace: a build older than that endpoint has no route for it, the request
+# falls through to the SPA static handler, and it answers 200 with index.html. So the pid was
+# never found, nothing was killed, and the respawn died with EADDRINUSE — reported, wrongly
+# but plausibly, as "another session started the dashboard first".
+#
+# A restart mechanism that only works on versions that already have it is no restart mechanism
+# at all. So: ask, and if the answer is not a pid, go and look.
+find_dashboard_pid() {
+  local pid
+  pid="$(curl -s -m 2 "$URL/api/version" 2>/dev/null | sed -n 's/.*"pid":\([0-9]*\).*/\1/p')"
+  if [[ -n "$pid" ]] && is_our_dashboard "$pid"; then echo "$pid"; return 0; fi
+
+  if [[ -d /proc ]]; then
+    for d in /proc/[0-9]*; do
+      pid="${d#/proc/}"
+      is_our_dashboard "$pid" && { echo "$pid"; return 0; }
+    done
+  elif command -v lsof >/dev/null 2>&1; then
+    # macOS has no /proc. Take the listener on the port, but only if it is a node process,
+    # so we still cannot shoot something unrelated.
+    pid="$(lsof -ti "tcp:$PORT" -sTCP:LISTEN 2>/dev/null | head -1)"
+    [[ -n "$pid" ]] && ps -p "$pid" -o command= 2>/dev/null | grep -q 'packages/server/dist' && { echo "$pid"; return 0; }
+  fi
+  return 1
+}
+
+# Stop the dashboard on this port and wait for the port to actually come free.
 #
 # Killing by pid rather than by port because we must not shoot an unrelated process that
 # happens to be listening — and killing via an HTTP shutdown endpoint is worse: the server
 # binds every interface, so that would be a remote kill switch on the LAN.
+#
+# The wait is not politeness. `kill` returns as soon as the signal is delivered, not when the
+# process has exited and released the socket, so spawning immediately races the old server to
+# the port and loses with EADDRINUSE.
 stop_dashboard() {
   local pid
-  pid="$(curl -s -m 2 "$URL/api/version" 2>/dev/null | sed -n 's/.*"pid":\([0-9]*\).*/\1/p')"
-  if [[ -n "$pid" ]] && tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | grep -q 'packages/server/dist'; then
-    kill "$pid" 2>/dev/null || true
-    for _ in $(seq 1 20); do
-      kill -0 "$pid" 2>/dev/null || break
-      sleep 0.1
-    done
-  fi
+  pid="$(find_dashboard_pid)" || return 1
+  kill "$pid" 2>/dev/null || true
+  for _ in $(seq 1 30); do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+  done
+  kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null || true
+  # And wait for the socket, which can outlive the process by a moment.
+  for _ in $(seq 1 20); do
+    [[ "$(probe "$URL" 1)" == "down" ]] && return 0
+    sleep 0.1
+  done
+  return 0
 }
 
 if [[ "$WANT_DASH" == "1" ]]; then
@@ -157,8 +206,15 @@ if [[ "$WANT_DASH" == "1" ]]; then
     # the bug you thought you had just fixed still happening. That is an expensive kind of
     # silence, and it cost a debugging round.
     echo "claudeview: dashboard at $URL is running an older build — restarting it"
-    stop_dashboard
-    STATE="down"
+    if stop_dashboard; then
+      STATE="down"
+    else
+      # Could not find it to stop it: something is serving this port that we cannot identify
+      # as ours. Leave it strictly alone and say so, rather than spawning a rival that will
+      # only die with EADDRINUSE and be reported as a lost race.
+      echo "claudeview: could not identify the process on $PORT — leaving it alone" >&2
+      echo "            stop it yourself, or use a different project directory" >&2
+    fi
   fi
 
   if [[ "$STATE" == "up" ]]; then
