@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { readFileSync, existsSync } from 'node:fs';
-import { resolve, sep } from 'node:path';
+import { resolve, sep, join, dirname } from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { Store, JobQueue, sync, buildBrief, checkStaleness, needsAttention, MODEL_FOR_TIER, protectStore, listSnapshots, healthcheck, compactStore } from '@claudeview/core';
 
 /**
@@ -55,6 +56,34 @@ function firstPositional(): string | undefined {
   return undefined;
 }
 
+/**
+ * The PROJECT, not the directory you happen to be standing in.
+ *
+ * `cd src/deep && cv compact` used to CREATE `src/deep/.claudeview` and then cheerfully report
+ * "already compact, nothing to do" — a confident success about a store it had just invented,
+ * while the real one sat two levels up untouched. Every command had this: `cv state` from a
+ * subdirectory returned an empty brief, `cv doctor` reported a fresh repo with no history.
+ *
+ * `bin/claudeview` has resolved the project root since it learned the same lesson about ports;
+ * the CLI simply never got it. So: walk up to an existing `.claudeview` first (the store that
+ * actually exists is the least ambiguous evidence of where the project is), then fall back to
+ * the git toplevel for a project that has no store yet, then to the directory itself.
+ */
+function projectRoot(from: string): string {
+  for (let d = from; ; d = dirname(d)) {
+    if (existsSync(join(d, '.claudeview'))) return d;
+    if (dirname(d) === d) break; // hit the filesystem root
+  }
+  try {
+    const top = execFileSync('git', ['-C', from, 'rev-parse', '--show-toplevel'],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    if (top) return top;
+  } catch {
+    // not a git repo, or no git — the directory itself is the best answer available
+  }
+  return from;
+}
+
 function targetRepo(): string {
   let picked = flag('repo') ?? firstPositional() ?? process.env.CLAUDE_PROJECT_DIR ?? process.cwd();
   picked = resolve(picked);
@@ -69,7 +98,10 @@ function targetRepo(): string {
   }
 
   if (!existsSync(picked)) die(`no such directory: ${picked}`);
-  return picked;
+
+  const root = projectRoot(picked);
+  if (root !== picked) console.error(`cv: ${picked} is inside ${root} — using the project root`);
+  return root;
 }
 
 const repo = targetRepo();
