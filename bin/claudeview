@@ -129,21 +129,36 @@ if [[ "$WANT_DASH" == "1" ]]; then
       nohup node "$CV_ROOT/packages/server/dist/server.js" \
       >"${TMPDIR:-/tmp}/claudeview-$PORT.log" 2>&1 &
 
-    # Poll for readiness rather than sleeping a fixed second and hoping.
+    # Give it a moment to come up — but NEVER wait on it.
     #
-    # Boot cost scales with the store and the transcripts — the server syncs before it serves,
-    # and on a large repo that is seconds, not milliseconds. A fixed sleep turns "slow" into
-    # "failed", which is a lie that sends you looking in the wrong place.
+    # This is the dashboard's cardinal rule and I broke it once already: it observes the
+    # session, so it must never delay the session. A previous version polled for up to 45
+    # seconds so it could print an accurate message, and on a large repo that meant sitting
+    # at a blank terminal waiting for a thing you did not ask to wait for. Correct reporting
+    # is not worth a second of your time here.
+    #
+    # So: a short grace period for the common case where boot is fast enough to give a
+    # definite answer, then get out of the way and say honestly that it is still starting.
     STATE="down"
-    for _ in $(seq 1 30); do
-      STATE="$(probe "$URL" 1)"
+    for _ in $(seq 1 6); do
+      STATE="$(probe "$URL" 0.5)"
       [[ "$STATE" != "down" ]] && break
-      sleep 0.5
+      sleep 0.25
     done
+
+    if [[ "$STATE" == "down" ]] && kill -0 $! 2>/dev/null; then
+      # Alive, just not finished booting. The browser will connect when it is ready, and the
+      # session starts NOW.
+      echo "claudeview: dashboard starting in the background → $URL"
+      open_browser "$URL"
+      STATE="deferred"
+    fi
 
     if [[ "$STATE" == "up" ]]; then
       echo "claudeview: dashboard → $URL"
       open_browser "$URL"
+    elif [[ "$STATE" == "deferred" ]]; then
+      : # already reported, already opening; the session must not wait
     else
       # Deliberately no browser here: a tab onto a port with nothing behind it is worse than
       # no tab, because it looks like the dashboard is broken rather than absent.

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, readFileSync, writeFileSync, appendFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync, writeFileSync, appendFileSync, renameSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Store } from './store.js';
@@ -202,7 +202,9 @@ test('a held Store sees other writers, without re-reading on every call', () => 
 
   assert.equal(held.all('insight').length, 52, 'another writer is visible immediately');
   assert.equal(held.get('insight', 'i2')!.title, 'from another session');
-  assert.ok(held.reloads > afterFirstRead, 'and that required exactly one re-parse');
+  // Seen without re-reading history: the log only grew, so only the growth was read. See
+  // 'growth is read incrementally; replacement is not' for the safety conditions on that.
+  assert.equal(held.reloads, afterFirstRead, 'and it cost no full re-parse');
 
   // Including a wholesale rewrite of the log under us — what compaction and `git pull` do.
   const folded = other.foldedRaw('insight');
@@ -249,6 +251,79 @@ test('a concurrent appender is not swallowed by our own write', () => {
 
   const ids = held.all('insight').map((r) => r.id).sort();
   assert.deepEqual(ids, ['mine1', 'mine2', 'theirs'], 'nobody lost a record');
+
+  rmSync(root, { recursive: true, force: true });
+});
+
+/**
+ * An append-only log should only ever cost what was appended.
+ *
+ * The cache validates itself against the file, which is correct but was all-or-nothing: any
+ * change meant re-parsing the whole log. That is fine when the store is idle and catastrophic
+ * when it is not — and it is never idle during a live session, because the observer appends
+ * events every couple of seconds. So the dashboard re-parsed every megabyte of history to
+ * answer every request, and refreshing it "took ages" precisely while you were working, which
+ * is the only time anyone looks at it.
+ *
+ * The log is APPEND-ONLY. That is the whole design. So when it has only grown, read the new
+ * bytes and fold them into what we already have: cost proportional to what happened, not to
+ * everything that has ever happened.
+ *
+ * Safety is by inode plus a boundary hash, not by size alone:
+ *
+ *   - inode catches wholesale replacement — `cv compact` writes a temp file and renames, and
+ *     `git pull`/`git checkout` do the same, so the inode changes and we re-read in full;
+ *   - the boundary hash (the bytes immediately before where we stopped) catches an IN-PLACE
+ *     rewrite that happens to leave the file longer, which keeps the inode and would
+ *     otherwise have us tailing from an offset into content that no longer means what it did.
+ *
+ * Get either wrong and the store silently answers from a mixture of two different files.
+ */
+test('growth is read incrementally; replacement is not', () => {
+  const root = repo();
+  const held = new Store(root);
+  const f = join(root, '.claudeview', 'insights.jsonl');
+  const rec = (id: string, title: string) => ({
+    id, provenance: 'authored' as const, title, detail: 'd',
+    severity: 'low' as const, confidence: 0.5, status: 'open' as const,
+  });
+  const raw = (id: string, title: string) => JSON.stringify({
+    id, kind: 'insight', rev: 0, actor: 'someone-else', ts: '2026-07-21T00:00:00.000Z',
+    provenance: 'authored', title, detail: 'd', severity: 'low', confidence: 0.5,
+    evidence: [], status: 'open',
+  }) + '\n';
+
+  for (let i = 0; i < 200; i++) held.put('insight', rec(`i${i}`, `t${i}`) as any);
+  assert.equal(held.all('insight').length, 200);
+  const fullReads = held.reloads;
+  const tails = held.tails;
+
+  // Another process appends — the live-session case, over and over.
+  for (let n = 0; n < 5; n++) {
+    appendFileSync(f, raw(`other${n}`, `from elsewhere ${n}`));
+    assert.equal(held.all('insight').length, 201 + n, 'the new record is visible');
+  }
+  assert.equal(held.reloads, fullReads, 'growth never triggered a full re-parse');
+  assert.equal(held.tails, tails + 5, 'it was read incrementally, five times');
+  assert.equal(held.get('insight', 'other4')!.title, 'from elsewhere 4');
+
+  // Compaction: temp file, then rename. New inode — this MUST be read in full, because the
+  // bytes we already hold have been replaced rather than added to.
+  const folded = held.foldedRaw('insight');
+  writeFileSync(`${f}.tmp`, [...folded.values()].map((r) => JSON.stringify(r)).join('\n') + '\n');
+  renameSync(`${f}.tmp`, f);
+  assert.equal(held.all('insight').length, 205, 'still correct after replacement');
+  assert.ok(held.reloads > fullReads, 'and it was a full re-parse, not a tail');
+
+  // An in-place rewrite that leaves the file LONGER keeps the inode, so only the boundary
+  // hash can catch it. Without that check this returns a blend of two different files.
+  const beforeInPlace = held.reloads;
+  writeFileSync(f, [raw('rewritten', 'in place'), raw('rewritten2', 'in place too'),
+    ...[...folded.values()].map((r) => JSON.stringify(r) + '\n')].join(''));
+  const after = held.all('insight');
+  assert.ok(after.some((r) => r.id === 'rewritten'), 'in-place rewrite is not missed');
+  assert.equal(after.length, 207);
+  assert.ok(held.reloads > beforeInPlace, 'the boundary hash forced a full re-parse');
 
   rmSync(root, { recursive: true, force: true });
 });

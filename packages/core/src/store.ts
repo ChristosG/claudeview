@@ -84,14 +84,16 @@ export interface StoreStats {
  *   chunk independently truncates one record and invents another, both of which then fail to
  *   parse and get counted as "skipped" — a corruption that looks like tolerated garbage.
  */
-function eachLine(file: string, chunkSize: number, fn: (line: string) => void): void {
+function eachLine(file: string, chunkSize: number, fn: (line: string) => void, from = 0): void {
   const fd = openSync(file, 'r');
   try {
     const buf = Buffer.allocUnsafe(chunkSize);
     const dec = new StringDecoder('utf8');
     let carry = '';
     let n: number;
-    while ((n = readSync(fd, buf, 0, chunkSize, null)) > 0) {
+    let pos: number | null = from || null;
+    while ((n = readSync(fd, buf, 0, chunkSize, pos)) > 0) {
+      if (pos !== null) pos += n;
       const parts = (carry + dec.write(buf.subarray(0, n))).split('\n');
       carry = parts.pop()!; // last element is a partial line, or '' if the chunk ended cleanly
       for (const p of parts) fn(p);
@@ -118,6 +120,42 @@ function canonical(v: unknown): string {
     .filter((k) => (v as Record<string, unknown>)[k] !== undefined)
     .map((k) => `${JSON.stringify(k)}:${canonical((v as Record<string, unknown>)[k])}`)
     .join(',')}}`;
+}
+
+/**
+ * What we know about a log the last time we read it, and how far we got.
+ *
+ * `ino` and `boundary` are what make incremental reading safe rather than merely fast. A log
+ * that only grew can be tailed from `size`; a log that was REPLACED must be re-read entirely,
+ * and the two are indistinguishable by size alone.
+ */
+interface ReadState {
+  ino: number;
+  size: number;
+  mtimeMs: number;
+  /** Hash of the bytes immediately before `size` — proof the prefix we hold is still there. */
+  boundary: string;
+}
+
+/**
+ * Fingerprint the last stretch of bytes before `end`.
+ *
+ * This is the guard against an in-place rewrite: a file replaced by `writeFileSync` keeps its
+ * inode, and if the new content happens to be longer it looks exactly like growth. Tailing it
+ * would splice the tail of a new file onto the fold of an old one and answer from a store
+ * that never existed. Reading 256 bytes to rule that out is free next to re-parsing megabytes.
+ */
+function boundaryHash(file: string, end: number): string {
+  if (end <= 0) return '';
+  const want = Math.min(256, end);
+  const fd = openSync(file, 'r');
+  try {
+    const buf = Buffer.allocUnsafe(want);
+    const n = readSync(fd, buf, 0, want, end - want);
+    return createHash('sha256').update(buf.subarray(0, n)).digest('hex').slice(0, 16);
+  } finally {
+    closeSync(fd);
+  }
 }
 
 /** What a caller supplies: the payload, minus the bookkeeping the store stamps itself. */
@@ -151,10 +189,12 @@ export class Store {
    * which is correct and costs a full re-parse of the log on every single API call — 0.39s at
    * 36 MB, and minutes at 513 MB.
    */
-  private seen = new Map<Kind, string>();
+  private seen = new Map<Kind, ReadState>();
 
   /** Full re-parses performed. Not diagnostics — the property the cache tests assert on. */
   reloads = 0;
+  /** Incremental tail reads — growth folded in without re-reading history. */
+  tails = 0;
 
   /**
    * `storeDir` defaults to `<repoRoot>/.claudeview` and should stay that way in real use —
@@ -219,7 +259,7 @@ export class Store {
    * truncated by a crash mid-append. A parser that throws on the first bad line would
    * take down the whole dashboard over one stray comma. We skip and count instead.
    */
-  private readRaw(kind: Kind): CVRecord[] {
+  private readRaw(kind: Kind, from = 0): CVRecord[] {
     const f = this.file(kind);
     if (!existsSync(f)) {
       this.lastStats = { parsed: 0, skipped: 0 };
@@ -237,7 +277,7 @@ export class Store {
       } catch {
         skipped++;
       }
-    });
+    }, from);
     this.lastStats = { parsed: out.length, skipped };
     return out;
   }
@@ -250,12 +290,13 @@ export class Store {
    * one-second filesystem granularity. Together they are as good as this needs to be, and the
    * cost is a syscall measured in microseconds against a re-parse measured in seconds.
    */
-  private signature(kind: Kind): string {
+  private currentState(kind: Kind): ReadState | undefined {
     try {
-      const st = statSync(this.file(kind));
-      return `${st.size}:${st.mtimeMs}`;
+      const f = this.file(kind);
+      const st = statSync(f);
+      return { ino: st.ino, size: st.size, mtimeMs: st.mtimeMs, boundary: boundaryHash(f, st.size) };
     } catch {
-      return ''; // absent, which is a state like any other and must be noticed when it changes
+      return undefined; // absent, which is a state like any other and must be noticed
     }
   }
 
@@ -270,10 +311,31 @@ export class Store {
    * embarrassing possible bug.
    */
   private folded(kind: Kind): Map<string, CVRecord> {
-    const sig = this.signature(kind);
-    const m0 = this.cache.get(kind);
-    if (m0 && this.seen.get(kind) === sig) return m0;
+    const cached = this.cache.get(kind);
+    const was = this.seen.get(kind);
+    const now = this.currentState(kind);
 
+    if (cached && was && now) {
+      // Untouched: nothing to do at all.
+      if (now.ino === was.ino && now.size === was.size && now.mtimeMs === was.mtimeMs) return cached;
+
+      // Grew, same file, and the bytes before our stopping point are unchanged — so every
+      // record we already folded is still there and still means the same thing. Read only
+      // what arrived. This is the difference between a dashboard that stays responsive during
+      // a live session and one that re-parses all of history to answer every request.
+      if (now.ino === was.ino && now.size > was.size
+          && boundaryHash(this.file(kind), was.size) === was.boundary) {
+        this.tails++;
+        for (const r of this.readRaw(kind, was.size)) {
+          const prev = cached.get(r.id);
+          cached.set(r.id, prev ? wins(prev, r) : r);
+        }
+        this.seen.set(kind, this.currentState(kind)!);
+        return cached;
+      }
+    }
+
+    // Replaced, truncated, rewritten in place, or never read: start clean.
     let m = new Map<string, CVRecord>();
     this.reloads++;
     for (const r of this.readRaw(kind)) {
@@ -285,7 +347,8 @@ export class Store {
     // signature we just computed is already stale, and recording it would pin the cache to a
     // file we never fully saw. Recording what the file is NOW costs one extra syscall and
     // means the worst case is one redundant re-read rather than a silently missed record.
-    this.seen.set(kind, this.signature(kind));
+    const after = this.currentState(kind);
+    if (after) this.seen.set(kind, after); else this.seen.delete(kind);
     return m;
   }
 
@@ -434,7 +497,8 @@ export class Store {
     }
     appendFileSync(file, payload);
     if (statSync(file).size === sizeBefore + Buffer.byteLength(payload)) {
-      this.seen.set(kind, this.signature(kind));
+      const st = this.currentState(kind);
+      if (st) this.seen.set(kind, st); else this.seen.delete(kind);
     } else {
       this.seen.delete(kind);
     }
