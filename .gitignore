@@ -12,8 +12,22 @@ dist/
 # Playwright screenshots from local verification
 .playwright-mcp/
 
-# Session rollups are per-machine history, not shared knowledge. Flows/decisions/insights
-# ARE committed (that is the point); your own session log is not.
+# Session rollups are excluded HERE, and here only, because THIS repo is public.
+#
+# Do not copy this line into your own projects, and note that ClaudeView never writes a
+# .gitignore into one — in a normal project sessions.jsonl is tracked, which is correct and
+# deliberate. Session rollups are the PORTABLE RESIDUE of the event stream: raw events are
+# derived from transcripts that live in ~/.claude on a single machine, so they stay in
+# gitignored cache/, and the rollup is the only thing that carries "who did what, when, and
+# which commits were witnessed" to a second machine. Ignore it and a laptop clone learns
+# nothing about work done on the desktop. See rollUpSessions in observer/transcripts.ts.
+#
+# The reason to exclude it from a PUBLIC repo is different and much narrower: a rollup lists
+# the files you touched and the hours you touched them. That is personal telemetry, and
+# publishing it is a privacy choice, not a design one.
+#
+# (An earlier version of this comment claimed session rollups were "per-machine history, not
+# shared knowledge". That was wrong, and it contradicted the code that produces them.)
 .claudeview/sessions.jsonl
 
 # Queued/claimed analysis jobs are local runtime state, not knowledge.
