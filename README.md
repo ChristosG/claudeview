@@ -23,12 +23,37 @@ Put the launcher on your `PATH`:
 echo "export PATH=\"$PWD/bin:\$PATH\"" >> ~/.bashrc && source ~/.bashrc
 ```
 
-Or, if you already keep a `bin` directory on your `PATH`, symlink it there instead — the
-launcher resolves the link and finds the checkout on its own:
+That puts two commands on your `PATH`: **`claudeview`**, the launcher, and **`cv`**, the CLI.
+
+Or, if you already keep a `bin` directory on your `PATH`, symlink them there instead — both
+resolve the link and find the checkout on their own:
 
 ```bash
 ln -s "$PWD/bin/claudeview" ~/.local/bin/claudeview
+ln -s "$PWD/bin/cv"         ~/.local/bin/cv
 ```
+
+## Update
+
+```bash
+cd /path/to/claudeview
+git pull && pnpm install && pnpm -r build
+```
+
+That's the whole update. Your projects are untouched: every project keeps its own knowledge
+in its own `.claudeview/` directory, and the code you just pulled only reads and writes
+there. Nothing is stored centrally, so there is nothing to migrate.
+
+Worth running once per project after an update, on any project you have used for a while:
+
+```bash
+cd ~/your-project
+cv doctor        # is ClaudeView actually working here, right now?
+```
+
+`doctor` drives the real thing against the real repo — it deliberately perturbs a file to
+prove that a claim notices its own code moving, and always puts the file back. If it reports
+the store is not compact, see [Maintenance](#maintenance).
 
 Then, from **any** project you work on:
 
@@ -182,11 +207,42 @@ is exactly why this runs on anyone's laptop.
 ## Health check
 
 ```bash
-node packages/cli/dist/cli.js doctor
+cv doctor
 ```
 
 Proves the store is readable, the transcripts are being found, the index is current, and the
 staleness engine actually detects a moved anchor — on your repo, on demand.
+
+## Maintenance
+
+Almost none. The store grows with what you actually do, and a project's knowledge is measured
+in megabytes. But if `cv doctor` reports **`store is compact`** as a failure:
+
+```bash
+cv compact
+```
+
+The store is append-only: updating a record appends a new revision rather than editing a line,
+and readers keep the newest. `compact` folds each log back to one line per record — the same
+answer every reader was already computing. It is pure local file I/O: **no model, no network,
+no tokens**, and a few seconds even on a very large store.
+
+It is a repair, not a chore. Versions before v0.1.1 rewrote session rollups on every poll tick
+whether or not anything had changed, so a store grew with *uptime* rather than with activity —
+one real project reached 1.2 GB in 44 hours of dashboard uptime, at which point it crossed
+V8's 512 MiB string limit and could not be read at all. That is fixed at the source; `compact`
+exists for stores written before the fix.
+
+What it will not touch:
+
+> **Your authored history is never folded.** Decisions, insights, experiments, runs, threads,
+> flows and panels keep *every* revision, forever. Only machine-regenerated kinds — session
+> rollups and the gitignored `event`/`component` caches — are ever compacted, and they are
+> excluded by name rather than by size, precisely so that a growing decision log can never
+> cross a threshold and get eaten.
+
+Originals are copied to `.claudeview/backup/` before anything is rewritten, and the swap is
+atomic. Delete that directory once you're satisfied.
 
 ## Status
 

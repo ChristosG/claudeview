@@ -308,11 +308,11 @@ const commands: Record<string, () => Promise<void> | void> = {
    * was thrown away, and it is the only reassurance that matters before rewriting a store.
    */
   compact() {
-    const res = compactStore(repo);
+    const res = compactStore(repo, { force: argv.includes('--force') });
     const mb = (n: number) => `${(n / 1e6).toFixed(1)} MB`;
 
     if (res.kinds.length === 0) {
-      console.log(`ClaudeView store is already compact — ${repo}\n  nothing to do.`);
+      console.log(`ClaudeView store is already compact — ${repo}\n  nothing to do. (--force folds the last few revisions anyway.)`);
       return;
     }
 

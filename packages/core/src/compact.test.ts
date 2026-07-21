@@ -159,6 +159,34 @@ test('the original is preserved and the swap is atomic', () => {
 });
 
 /**
+ * A store with a little honest churn is left alone; --force overrides.
+ *
+ * A live store is never perfectly folded — a running session gains a revision whenever its
+ * counts move — so "fold unless already one line per record" would rewrite the log and cut a
+ * new backup on every single run. On the 1.2 GB store that meant copying half a gigabyte to
+ * backup/ to reclaim a few kilobytes, and the repair would have become a slow-motion version
+ * of the bug it fixes. Damaged stores sit at 2,464x, so the threshold never has to be close.
+ */
+test('a lightly-churned store is not worth rewriting', () => {
+  const root = repo();
+  // 256 records carrying 264 lines: 1.03x, exactly what a healthy live store looks like.
+  for (let i = 0; i < 256; i++) appendRaw(root, 'sessions.jsonl', { ...session(0), id: `session:${i}`, sessionId: String(i) });
+  for (let i = 0; i < 8; i++) appendRaw(root, 'sessions.jsonl', { ...session(1), id: `session:${i}`, sessionId: String(i) });
+  const untouched = readFileSync(join(root, '.claudeview', 'sessions.jsonl'), 'utf8');
+
+  assert.equal(compactStore(root).kinds.length, 0, 'declines below the waste threshold');
+  assert.equal(readFileSync(join(root, '.claudeview', 'sessions.jsonl'), 'utf8'), untouched);
+  assert.ok(!existsSync(join(root, '.claudeview', 'backup')), 'and cuts no backup');
+
+  // The escape hatch still works, for anyone who wants the last few kilobytes.
+  const forced = compactStore(root, { force: true });
+  assert.equal(forced.kinds[0]!.after, 256);
+  assert.equal(lines(root, 'sessions.jsonl'), 256);
+
+  rmSync(root, { recursive: true, force: true });
+});
+
+/**
  * Compaction on an already-healthy store is a no-op that touches nothing.
  *
  * If it rewrote regardless it would create a backup every run, and the "repair" would become

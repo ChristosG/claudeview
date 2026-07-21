@@ -36,6 +36,15 @@ import { FILES, type Kind } from './schema.js';
  */
 export const COMPACTABLE: ReadonlySet<Kind> = new Set<Kind>(['session', 'event', 'component']);
 
+/**
+ * Below this many revisions per record, compaction declines to run.
+ *
+ * 1.5x is the point where a rewrite pays for the backup it forces. Damaged stores are not
+ * near this line — the real one was at 2,464x — so the threshold separates "bloated" from
+ * "in use" without needing to be tuned.
+ */
+const MIN_WASTE_RATIO = 1.5;
+
 export interface CompactedKind {
   kind: Kind;
   file: string;
@@ -57,7 +66,7 @@ export interface CompactResult {
 
 export function compactStore(
   repoRoot: string,
-  opts: { kinds?: Kind[]; storeDir?: string } = {},
+  opts: { kinds?: Kind[]; storeDir?: string; force?: boolean } = {},
 ): CompactResult {
   const started = Date.now();
   const store = new Store(repoRoot, opts.storeDir);
@@ -78,7 +87,18 @@ export function compactStore(
     // every deleted record on the next read — a silent, delayed data corruption.
     const folded = store.foldedRaw(kind);
     const before = store.lastStats.parsed + store.lastStats.skipped;
-    if (folded.size === before) continue; // already one line per record; touch nothing
+
+    // Rewrite only when there is something worth reclaiming.
+    //
+    // A live store is never exactly one line per record — sessions legitimately gain
+    // revisions as they grow — so an "is it perfectly folded?" test would rewrite the log and
+    // cut a fresh backup on EVERY run, and the repair would slowly become the bloat it exists
+    // to remove. Ten stale revisions do not justify copying half a gigabyte to backup/.
+    //
+    // The threshold is a ratio rather than a size for the same reason the doctor's is: waste
+    // is proportional to what the store holds, and a fixed byte count is either meaningless
+    // on a large store or trigger-happy on a small one.
+    if (!opts.force && before < folded.size * MIN_WASTE_RATIO) continue;
 
     const bytesBefore = statSync(file).size;
 

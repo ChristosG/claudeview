@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+#
+# cv — ClaudeView's CLI, on your PATH.
+#
+#   cv doctor                    # is ClaudeView actually working on this repo?
+#   cv compact                   # fold a bloated store; free, local, keeps authored history
+#   cv state                     # the project brief, as an agent would read it
+#   cv sync                      # refresh the observed tier now
+#
+# `--repo <path>` targets another project; without it, the current directory is used.
+# Run `cv` with no arguments to list every command.
+#
+# This wrapper exists because the CLI is a private workspace package — `pnpm install` never
+# links its `bin` onto your PATH, so `cv` was a command that the docs, the doctor's own
+# remediation hint and the launcher's error message all referred to and none of which
+# existed. A tool that tells you to run something unrunnable is worse than one that stays
+# quiet, so: same bin/ directory as `claudeview`, same single PATH entry, and the advice is
+# now true.
+#
+set -euo pipefail
+
+# Resolve through symlinks so this works whether bin/ is on your PATH or a single link to
+# this file was dropped into ~/.local/bin. BASH_SOURCE is the LINK, not its target — bash
+# does not resolve it — so walking up from there without this lands in ~/.local and finds
+# no checkout. Same reasoning, same walk, as bin/claudeview.
+SELF="${BASH_SOURCE[0]}"
+while [[ -L "$SELF" ]]; do
+  LINK="$(readlink "$SELF")"
+  [[ "$LINK" == /* ]] && SELF="$LINK" || SELF="$(cd -P "$(dirname "$SELF")" && pwd)/$LINK"
+done
+CV_ROOT="${CLAUDEVIEW_ROOT:-$(cd -P "$(dirname "$SELF")/.." && pwd)}"
+
+CLI="$CV_ROOT/packages/cli/dist/cli.js"
+if [[ ! -f "$CLI" ]]; then
+  echo "cv: not built — run 'pnpm install && pnpm -r build' in $CV_ROOT" >&2
+  exit 1
+fi
+
+exec node "$CLI" "$@"
