@@ -15,7 +15,7 @@
  * uncomfortable questions directly, and it is meant to be run against a live repo.
  */
 import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync, writeFileSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, statSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { Store } from './store.js';
 import { sync } from './sync.js';
@@ -95,6 +95,38 @@ export async function healthcheck(repoRoot: string): Promise<Check[]> {
     checks.push({ name, ok, detail, critical });
 
   const store = new Store(repoRoot);
+
+  // ── 0. Is the filesystem itself fast enough for any of this to work? ──
+  //
+  // Everything below assumes a stat is roughly free. On a Windows drive mounted into WSL
+  // (/mnt/c) it is not: that path goes over the 9p protocol, where each stat is a round trip
+  // and walking a repo costs seconds instead of milliseconds. The dashboard then spends all
+  // its time walking rather than serving and looks "slow" for reasons that have nothing to do
+  // with ClaudeView — a diagnosis nobody reaches unaided, because every component is behaving
+  // correctly and the tool reports no fault anywhere.
+  //
+  // Measured, not assumed: some /mnt paths are perfectly quick, and WSL2 keeps changing.
+  const probeStart = Date.now();
+  let statted = 0;
+  for (const f of (() => { try { return readdirSync(repoRoot); } catch { return []; } })().slice(0, 200)) {
+    try { statSync(join(repoRoot, f)); statted++; } catch { /* vanished; not our business */ }
+  }
+  const perStat = statted ? (Date.now() - probeStart) / statted : 0;
+  const wsl = existsSync('/proc/version')
+    && /microsoft/i.test(readFileSync('/proc/version', 'utf8'));
+
+  add('filesystem is fast enough to watch', perStat < 1,
+    perStat < 1
+      ? `~${perStat.toFixed(2)}ms per stat`
+      : `~${perStat.toFixed(1)}ms per stat — ${statted} files took ${Date.now() - probeStart}ms.`
+        + (wsl && /^\/mnt\/[a-z]\//.test(repoRoot)
+          ? ` This repo lives on a Windows drive mounted into WSL, which goes over 9p: every`
+            + ` file operation is a round trip. Move the project into the WSL filesystem`
+            + ` (e.g. ~/code/) and it will be 10-100x faster — for git, your editor, your`
+            + ` build, and ClaudeView alike. ClaudeView will back off its polling to stay out`
+            + ` of the way, but it cannot make the disk faster.`
+          : ` Watching a tree this slow costs more than it is worth; ClaudeView polls less`
+            + ` often to compensate.`));
 
   // ── 1. Is the observed tier actually observing? ──
   const dirs = transcriptDirs(repoRoot);

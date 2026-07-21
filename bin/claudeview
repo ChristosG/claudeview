@@ -279,16 +279,23 @@ if [[ "$WANT_DASH" == "1" ]]; then
     #
     # So: a short grace period for the common case where boot is fast enough to give a
     # definite answer, then get out of the way and say honestly that it is still starting.
+    DASH_PID=$!
     STATE="down"
     for _ in $(seq 1 6); do
       STATE="$(probe "$URL" 0.5)"
-      [[ "$STATE" != "down" ]] && break
+      [[ "$STATE" == "up" || "$STATE" == broken* ]] && break
       sleep 0.25
     done
 
-    if [[ "$STATE" == "down" ]] && kill -0 $! 2>/dev/null; then
-      # Alive, just not finished booting. The browser will connect when it is ready, and the
-      # session starts NOW.
+    # Still booting is not failing.
+    #
+    # `busy` here is the NORMAL case, not an error: the server binds the port before it syncs,
+    # so from the outside it is listening and not yet answering. The previous version only
+    # accepted `down` as "starting", so a perfectly healthy dashboard mid-boot was announced
+    # as "failed to start" — with its own log tail printed underneath showing it cheerfully
+    # working. On a slow filesystem that is every single launch.
+    if [[ "$STATE" == "down" || "$STATE" == "busy" ]] && kill -0 "$DASH_PID" 2>/dev/null; then
+      # Alive. The browser will connect when it is ready, and the session starts NOW.
       echo "claudeview: dashboard starting in the background → $URL"
       open_browser "$URL"
       STATE="deferred"

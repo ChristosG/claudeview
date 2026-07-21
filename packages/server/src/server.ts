@@ -262,9 +262,33 @@ function watchEverything() {
   let last: Fingerprint | undefined;
   let running = false;
 
+  /**
+   * How often to look — decided by how expensive looking turns out to BE.
+   *
+   * A fixed 2s interval assumes the probe is cheap, which it is on a local disk: ~12ms for a
+   * 30k-LOC repo, so ~0.6% of wall clock, and you never notice.
+   *
+   * That assumption collapses on a slow filesystem. A repo on a WSL /mnt/c drive goes through
+   * the 9p protocol, where every stat is a round trip and a tree walk costs seconds rather
+   * than milliseconds. At 2s intervals the poller is then running essentially continuously —
+   * and because Node is single-threaded, every one of those seconds is a second the dashboard
+   * cannot answer an HTTP request. The dashboard "being slow" was the poller eating the event
+   * loop, on a filesystem nobody had measured.
+   *
+   * So the interval is derived rather than assumed: never spend more than about a tenth of
+   * wall-clock time watching. Cheap probe, 2s, exactly as before. A probe that costs 3
+   * seconds gets looked at every 30 instead, which is still far more responsive than the
+   * human sitting in front of it — and leaves the other 90% for serving.
+   */
+  const MIN_MS = 2_000;
+  const MAX_MS = 120_000;
+  const DUTY = 10; // spend at most ~1/DUTY of the time looking
+  let interval = MIN_MS;
+
   const tick = async () => {
     if (running) return; // a slow sync must not stack up behind itself
     running = true;
+    const t0 = Date.now();
     try {
       const now = fingerprint(REPO, join(homedir(), '.claude'));
       const diff = changed(last, now);
@@ -282,11 +306,23 @@ function watchEverything() {
       // A failed tick must never kill the poller. The next one retries.
     } finally {
       running = false;
+      const cost = Date.now() - t0;
+      const next = Math.min(MAX_MS, Math.max(MIN_MS, cost * DUTY));
+      if (next !== interval && (next > interval * 1.5 || next < interval / 1.5)) {
+        interval = next;
+        console.log(`  watch: a check costs ${cost}ms here — polling every ${Math.round(interval / 1000)}s`);
+      } else {
+        interval = next;
+      }
+      timer = setTimeout(tick, interval);
+      timer.unref();
     }
   };
 
-  void tick(); // establish the baseline immediately
-  setInterval(tick, 2000).unref();
+  // setTimeout rather than setInterval: the delay has to be recomputed from what the last
+  // tick actually cost, and setInterval cannot be told to change its mind.
+  let timer = setTimeout(tick, 0);
+  timer.unref();
 }
 
 // ───────────────────── static + http ─────────────────────
